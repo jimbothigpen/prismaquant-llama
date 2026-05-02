@@ -339,33 +339,48 @@ def screen_4_priority_budget(state: WizardState) -> None:
 # Pipeline runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_pipeline(state: WizardState, dry_run: bool = False) -> None:
+def run_pipeline(state: WizardState, dry_run: bool = False,
+                 output_root: Optional[Path] = None,
+                 keep_work: bool = False) -> None:
     """
-    Wire up the existing pipeline: download → probe → imatrix → costs →
-    bridge → allocate → quantize. Each step prints its CLI invocation.
-    Cache hits short-circuit; cache misses run the underlying script.
+    Run the prismaquant build pipeline derived from wizard state.
 
-    STUB: this is where the real glue code goes — for now, just print the
-    sequence so users see the full picture.
+    A→I stages handled by pipeline_runner.run_full_pipeline(). Wizard's
+    job ends here; pipeline_runner does subprocess + logging.
     """
     print()
     print("=" * 66)
     print(" Pipeline plan (dry-run)" if dry_run else " Running pipeline")
     print("=" * 66)
-    cache = CACHE_ROOT / state.cache_key()
-    print(f"  Cache: {cache}")
-    print(f"  HF model: {state.hf_model}@{state.hf_revision}")
+    print(f"  HF model:    {state.hf_model}@{state.hf_revision}")
     print(f"  Calibration: {state.calibration}")
-    print(f"  Formats: {','.join(state.formats)}")
-    print(f"  Priority: {state.priority}  Budget: {state.budget_gb} GB")
-    print(f"  Output: {state.output_name}")
+    print(f"  Formats:     {','.join(state.formats)}")
+    print(f"  Priority:    {state.priority}  Budget: {state.budget_gb} GB")
+    print(f"  Output:      {state.output_name}")
     print()
     if dry_run:
-        print("  → run-pipeline.sh would be invoked with the above settings.")
+        print("  → pipeline_runner would be invoked with the above settings.")
         print("  → Re-run without --dry-run to execute.")
         return
-    # TODO: actually exec ../run-pipeline.sh with state-derived env vars
-    raise NotImplementedError("pipeline execution not implemented in stub")
+
+    # Lazy import to avoid circulars + keep wizard.py importable when pipeline
+    # deps (huggingface_hub, etc.) aren't installed.
+    try:
+        from .pipeline_runner import PipelineConfig, run_full_pipeline
+    except ImportError:
+        from pipeline_runner import PipelineConfig, run_full_pipeline  # type: ignore
+
+    cfg = PipelineConfig(
+        hf_model=state.hf_model,
+        hf_revision=state.hf_revision,
+        binary=Path(state.binary_path) if state.binary_path else None,
+        calibration=Path(state.calibration) if state.calibration else None,
+        output_root=output_root or Path.home() / "prismaquant-builds",
+        budget_gb=state.budget_gb,
+        priority=state.priority,
+        formats=state.formats,
+    )
+    run_full_pipeline(cfg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

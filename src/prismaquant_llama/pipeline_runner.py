@@ -1,0 +1,538 @@
+"""
+End-to-end pipeline runner — orchestrates the full prismaquant build:
+
+    A. Download HF safetensors
+    B. Convert HF → BF16 GGUF
+    C. Generate Hessian probe (prismaquant package)
+    D. Generate imatrix (llama-imatrix)
+    E. Measure per-(tensor, format) MSE (llama-quantize-cost)
+    F. Bridge HF tensor names → GGUF tensor names
+    G. Allocate (multi-choice knapsack)
+    H. Apply recipe (llama-quantize)
+    I. (Optional) PPL eval (llama-perplexity)
+
+Each stage is idempotent — checks for output file, skips if present.
+Per-stage logs go to <output>/work/<run-id>/logs/stage-<X>.log.
+
+CLI:
+    prismaquant-llama pipeline run \\
+        --hf-model meta-llama/Llama-3.2-1B-Instruct \\
+        --binary /path/to/llama-quantize \\
+        --calibration /path/to/wikitext.txt \\
+        --output ~/prismaquant-builds \\
+        --budget-gb 1.5 --priority 522
+
+Status: scaffold — subprocess wiring complete, end-to-end run not yet
+verified (waits on a free GPU for Stage C/D/E/H).
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+try:
+    from .paths import find_binary, WorkPaths, DEFAULT_OUTPUT_ROOT, discover_companion_binaries
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from paths import find_binary, WorkPaths, DEFAULT_OUTPUT_ROOT, discover_companion_binaries  # type: ignore
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class PipelineConfig:
+    hf_model: str                     # "meta-llama/Llama-3.2-1B-Instruct"
+    hf_revision: str = "main"
+    binary: Optional[Path] = None     # auto-discovered if None
+    calibration: Optional[Path] = None
+    output_root: Path = DEFAULT_OUTPUT_ROOT
+    budget_gb: float = 5.25
+    priority: str = "522"
+    budget_band_gb: float = 0.25
+    formats: list[str] = field(default_factory=lambda: [
+        "Q4_K", "Q5_K", "Q6_K", "Q8_0",
+        "IQ4_XS", "IQ4_K", "IQ4_KS", "IQ4_KSS",
+        "IQ3_K", "IQ3_KS", "IQ2_K",
+    ])
+    pinned: dict[str, str] = field(default_factory=lambda: {
+        "output.weight": "Q6_K",
+        "token_embd.weight": "Q8_0",
+    })
+    chunks_imatrix: int = 200
+    chunks_eval: int = 100
+    ctx: int = 4096
+    skip_eval: bool = False
+    convert_script: Optional[Path] = None  # auto-discover convert_hf_to_gguf.py
+    pipeline_scripts_dir: Optional[Path] = None  # bundled bridge + allocator
+    hsa_override: Optional[str] = None     # "11.0.2" for gfx1102/1103; auto-detect by hostname
+
+    def __post_init__(self):
+        if self.binary is None:
+            self.binary = find_binary("quantize")
+        if self.calibration is not None and not Path(self.calibration).exists():
+            raise FileNotFoundError(f"calibration corpus not found: {self.calibration}")
+        # Auto-locate convert_hf_to_gguf.py — assumes binary is at <fork>/build/bin/
+        if self.convert_script is None:
+            fork_root = self.binary.resolve().parents[2]
+            cand = fork_root / "convert_hf_to_gguf.py"
+            if cand.exists():
+                self.convert_script = cand
+        # Auto-locate bundled pipeline scripts (allocator.py, bridge_probe_to_gguf.py)
+        if self.pipeline_scripts_dir is None:
+            self.pipeline_scripts_dir = Path(__file__).parents[1] / "pipeline" / "scripts"
+        # Auto HSA override for non-native arches (gfx1102/gfx1103 → emulate gfx1100)
+        if self.hsa_override is None:
+            host = os.environ.get("HOSTNAME") or os.uname().nodename
+            if host in ("ai01",):  # extend per fleet
+                self.hsa_override = "11.0.2"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _log(paths: WorkPaths, stage: str, msg: str) -> None:
+    line = f"[{_ts()}] {msg}"
+    print(line)
+    if paths.logs_dir.exists():
+        log_path = paths.logs_dir / f"stage-{stage}.log"
+        with log_path.open("a") as f:
+            f.write(line + "\n")
+
+
+def _run(cmd: list[str], stage_log: Path, env_extra: Optional[dict] = None,
+         timeout: Optional[float] = None) -> int:
+    """Run a subprocess, tee stdout+stderr to stage_log, return rc."""
+    env = {**os.environ, **(env_extra or {})}
+    stage_log.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  $ {' '.join(str(c) for c in cmd)}")
+    with stage_log.open("a") as f:
+        f.write(f"\n=== {_ts()}: {' '.join(str(c) for c in cmd)} ===\n")
+        f.flush()
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=env, text=True, bufsize=1,
+        )
+        try:
+            for line in proc.stdout:  # type: ignore
+                f.write(line)
+                f.flush()
+        except KeyboardInterrupt:
+            proc.terminate()
+            raise
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return 124
+    return proc.returncode
+
+
+def _hsa_env(cfg: PipelineConfig) -> dict:
+    return {"HSA_OVERRIDE_GFX_VERSION": cfg.hsa_override} if cfg.hsa_override else {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage A — download HF safetensors
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_a_download(cfg: PipelineConfig, paths: WorkPaths) -> Path:
+    """Returns the local dir holding the HF model snapshot."""
+    safe_name = cfg.hf_model.replace("/", "__")
+    target = paths.hf_cache / safe_name
+    marker = target / ".download.complete"
+    if marker.exists():
+        _log(paths, "A", f"A. HF model cached at {target} (skip)")
+        return target
+    _log(paths, "A", f"A. downloading {cfg.hf_model}@{cfg.hf_revision} → {target}")
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        raise SystemExit(
+            "ERROR: huggingface_hub not installed. Run:\n"
+            "       pip install --user huggingface_hub")
+    snapshot_download(
+        repo_id=cfg.hf_model, revision=cfg.hf_revision,
+        local_dir=str(target),
+        # snapshot_download is conservative by default; let it manage cache.
+    )
+    marker.touch()
+    _log(paths, "A", f"A. download complete → {target}")
+    return target
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage B — convert HF → BF16 GGUF
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_b_convert(cfg: PipelineConfig, paths: WorkPaths, hf_dir: Path) -> Path:
+    safe_name = cfg.hf_model.replace("/", "__")
+    bf16_path = paths.bf16_dir / f"{safe_name}-BF16.gguf"
+    if bf16_path.exists():
+        _log(paths, "B", f"B. BF16 GGUF cached at {bf16_path} (skip)")
+        return bf16_path
+    if cfg.convert_script is None or not cfg.convert_script.exists():
+        raise SystemExit(
+            "ERROR: convert_hf_to_gguf.py not found. Pass --convert-script "
+            "or ensure it lives at <fork>/convert_hf_to_gguf.py")
+    _log(paths, "B", f"B. converting {hf_dir} → {bf16_path}")
+    rc = _run(
+        ["python3", str(cfg.convert_script), str(hf_dir),
+         "--outtype", "bf16", "--outfile", str(bf16_path)],
+        paths.logs_dir / "stage-B.log",
+    )
+    if rc != 0 or not bf16_path.exists():
+        raise SystemExit(f"FAIL: B convert_hf_to_gguf.py exit={rc}")
+    _log(paths, "B", f"B. BF16 GGUF: {bf16_path.stat().st_size/1024**3:.2f} GB")
+    return bf16_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage C — Hessian probe (prismaquant package)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_c_probe(cfg: PipelineConfig, paths: WorkPaths, hf_dir: Path) -> Path:
+    probe_path = paths.probe_dir / f"{cfg.hf_model.replace('/', '__')}-probe.pkl"
+    if probe_path.exists():
+        _log(paths, "C", f"C. probe.pkl cached at {probe_path} (skip)")
+        return probe_path
+    if cfg.calibration is None:
+        raise SystemExit("ERROR: stage C needs a calibration corpus (--calibration)")
+    _log(paths, "C", f"C. running prismaquant.incremental_probe on {hf_dir}")
+    rc = _run(
+        ["python3", "-m", "prismaquant.incremental_probe",
+         "--model", str(hf_dir),
+         "--dataset", str(cfg.calibration),
+         "--nsamples", "16", "--seqlen", "512",
+         "--device", "cpu", "--dtype", "bf16",
+         "--output", str(probe_path),
+         "--activation-cache-dir", str(paths.probe_dir / "act-cache"),
+         "--work-dir", str(paths.probe_dir / "work")],
+        paths.logs_dir / "stage-C.log",
+    )
+    if rc != 0 or not probe_path.exists():
+        raise SystemExit(
+            f"FAIL: C prismaquant.incremental_probe exit={rc}\n"
+            f"  Likely cause: prismaquant package not installed.\n"
+            f"  Install via: pip install --user --break-system-packages "
+            f"-e <prismaquant-source-dir>\n"
+            f"  Source: https://github.com/RobTand/prismaquant")
+    _log(paths, "C", f"C. probe.pkl: {probe_path.stat().st_size/1024**2:.1f} MB")
+    return probe_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage D — imatrix (llama-imatrix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_d_imatrix(cfg: PipelineConfig, paths: WorkPaths, bf16_path: Path) -> Path:
+    cache_path = paths.imatrix_cache / f"{bf16_path.stem}.imatrix.gguf"
+    work_path = paths.imatrix_dir / cache_path.name
+    if cache_path.exists():
+        _log(paths, "D", f"D. imatrix cached at {cache_path} (skip)")
+        if not work_path.exists():
+            paths.link_imatrix(cache_path)
+        return cache_path
+    companions = discover_companion_binaries(cfg.binary)
+    imatrix_bin = companions.get("imatrix")
+    if not imatrix_bin or not imatrix_bin.exists():
+        raise SystemExit("ERROR: llama-imatrix not found alongside llama-quantize")
+    _log(paths, "D", f"D. generating imatrix → {cache_path}")
+    rc = _run(
+        [str(imatrix_bin), "-m", str(bf16_path), "-f", str(cfg.calibration),
+         "-o", str(cache_path),
+         "-c", str(cfg.ctx), "-ngl", "99", "--no-mmap",
+         "--chunks", str(cfg.chunks_imatrix)],
+        paths.logs_dir / "stage-D.log", env_extra=_hsa_env(cfg),
+    )
+    if rc != 0 or not cache_path.exists():
+        raise SystemExit(f"FAIL: D llama-imatrix exit={rc}")
+    paths.link_imatrix(cache_path)
+    _log(paths, "D", f"D. imatrix: {cache_path.stat().st_size/1024**2:.1f} MB")
+    return cache_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage E — quantize-cost (per-tensor MSE per format)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_e_costs(cfg: PipelineConfig, paths: WorkPaths,
+                  bf16_path: Path, imatrix_path: Path) -> Path:
+    costs_path = paths.costs_dir / "costs.csv"
+    if costs_path.exists():
+        _log(paths, "E", f"E. costs.csv cached at {costs_path} (skip)")
+        return costs_path
+    companions = discover_companion_binaries(cfg.binary)
+    cost_bin = cfg.binary.parent / "llama-quantize-cost"
+    if not cost_bin.exists():
+        raise SystemExit(
+            f"ERROR: llama-quantize-cost not found at {cost_bin}.\n"
+            f"  Build llama.cpp with -DGGML_BUILD_TOOLS=ON.")
+    _log(paths, "E", f"E. measuring per-(tensor, format) MSE → {costs_path}")
+    rc = _run(
+        [str(cost_bin),
+         "--model", str(bf16_path),
+         "--types", ",".join(cfg.formats),
+         "--imatrix", str(imatrix_path),
+         "--include-regex", r"^(token_embd|output|blk\.(0|3))\.",
+         "--output", str(costs_path)],
+        paths.logs_dir / "stage-E.log",
+    )
+    if rc != 0 or not costs_path.exists():
+        raise SystemExit(f"FAIL: E llama-quantize-cost exit={rc}")
+    _log(paths, "E", f"E. costs.csv rows: {sum(1 for _ in costs_path.open())}")
+    return costs_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage F — bridge probe.pkl → bridge.json (HF → GGUF tensor names)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_f_bridge(cfg: PipelineConfig, paths: WorkPaths, probe_path: Path) -> Path:
+    bridge_path = paths.work / "bridge.json"
+    if bridge_path.exists():
+        _log(paths, "F", f"F. bridge.json cached at {bridge_path} (skip)")
+        return bridge_path
+    bridge_script = cfg.pipeline_scripts_dir / "bridge_probe_to_gguf.py"
+    if not bridge_script.exists():
+        raise SystemExit(f"ERROR: bridge_probe_to_gguf.py not found at {bridge_script}")
+    _log(paths, "F", f"F. bridging probe → {bridge_path}")
+    rc = _run(
+        ["python3", str(bridge_script),
+         "--probe", str(probe_path),
+         "--output", str(bridge_path),
+         "--aggregate", "sum",
+         "--unmapped-out", str(paths.work / "bridge-unmapped.json")],
+        paths.logs_dir / "stage-F.log",
+    )
+    if rc != 0 or not bridge_path.exists():
+        raise SystemExit(f"FAIL: F bridge exit={rc}")
+    return bridge_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage G — allocator (multi-choice knapsack at target budget + priority)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_g_allocate(cfg: PipelineConfig, paths: WorkPaths,
+                     bridge_path: Path, costs_path: Path,
+                     bf16_path: Path) -> Path:
+    recipe_path = paths.recipes_dir / f"recipe-PQ{cfg.budget_gb}-{cfg.priority}.json"
+    if recipe_path.exists():
+        _log(paths, "G", f"G. recipe cached at {recipe_path} (skip)")
+        return recipe_path
+    allocator_script = cfg.pipeline_scripts_dir / "allocator.py"
+    if not allocator_script.exists():
+        raise SystemExit(f"ERROR: allocator.py not found at {allocator_script}")
+    pinned_path = paths.work / "pinned.json"
+    pinned_path.write_text(json.dumps(cfg.pinned, indent=2))
+    _log(paths, "G", f"G. allocating @ {cfg.budget_gb} GB priority {cfg.priority}")
+    rc = _run(
+        ["python3", str(allocator_script),
+         "--bridge", str(bridge_path),
+         "--costs", str(costs_path),
+         "--budget-gb", str(cfg.budget_gb),
+         "--budget-band-gb", str(cfg.budget_band_gb),
+         "--pinned", str(pinned_path),
+         "--recipe-out", str(recipe_path),
+         "--allow-types", ",".join(cfg.formats),
+         "--gguf", str(bf16_path),
+         "--propagate-from-exemplars",
+         "--exemplar-layers", "0,3"],
+        paths.logs_dir / "stage-G.log",
+    )
+    if rc != 0 or not recipe_path.exists():
+        raise SystemExit(f"FAIL: G allocator exit={rc}")
+    _log(paths, "G", f"G. recipe: {recipe_path}")
+    return recipe_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage H — apply recipe (llama-quantize)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_h_quantize(cfg: PipelineConfig, paths: WorkPaths,
+                     bf16_path: Path, recipe_path: Path,
+                     imatrix_path: Path) -> Path:
+    safe_name = cfg.hf_model.replace("/", "__")
+    out_gguf = paths.gguf_output_path(safe_name, cfg.budget_gb, cfg.priority)
+    if out_gguf.exists():
+        _log(paths, "H", f"H. GGUF cached at {out_gguf} (skip)")
+        return out_gguf
+    # The allocator outputs JSON; llama-quantize wants a tensor-type-file.
+    recipe_txt = recipe_path.with_suffix(".txt")
+    if not recipe_txt.exists():
+        recipe_data = json.loads(recipe_path.read_text())
+        type_assignments = recipe_data.get("assignments") or recipe_data
+        with recipe_txt.open("w") as f:
+            for tensor, fmt in type_assignments.items():
+                if isinstance(fmt, dict):
+                    fmt = fmt.get("type") or fmt.get("format")
+                f.write(f"{tensor}={fmt}\n")
+    _log(paths, "H", f"H. applying recipe → {out_gguf}")
+    rc = _run(
+        [str(cfg.binary),
+         "--imatrix", str(imatrix_path),
+         "--tensor-type-file", str(recipe_txt),
+         str(bf16_path), str(out_gguf), "IQ4_KS"],
+        paths.logs_dir / "stage-H.log", env_extra=_hsa_env(cfg),
+    )
+    if rc != 0 or not out_gguf.exists():
+        raise SystemExit(f"FAIL: H llama-quantize exit={rc}")
+    size_gb = out_gguf.stat().st_size / 1024**3
+    _log(paths, "H", f"H. final GGUF: {out_gguf} ({size_gb:.2f} GB)")
+    return out_gguf
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage I — PPL eval (optional)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stage_i_eval(cfg: PipelineConfig, paths: WorkPaths,
+                 final_gguf: Path) -> Optional[float]:
+    if cfg.skip_eval:
+        _log(paths, "I", "I. eval skipped (--skip-eval)")
+        return None
+    companions = discover_companion_binaries(cfg.binary)
+    perp_bin = companions.get("perplexity")
+    if not perp_bin:
+        _log(paths, "I", "I. WARN: llama-perplexity not found, skipping eval")
+        return None
+    eval_log = paths.logs_dir / "stage-I.log"
+    _log(paths, "I", f"I. PPL eval @ chunks={cfg.chunks_eval}")
+    rc = _run(
+        [str(perp_bin), "-m", str(final_gguf), "-f", str(cfg.calibration),
+         "-c", str(cfg.ctx), "-b", "2048",
+         "-ctk", "f16", "-ctv", "f16", "-fa", "on",
+         "-ngl", "99", "--chunks", str(cfg.chunks_eval), "--no-mmap"],
+        eval_log, env_extra=_hsa_env(cfg),
+    )
+    # Parse PPL from log
+    import re
+    text = eval_log.read_text()
+    m = re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)", text)
+    if m:
+        ppl = float(m.group(1))
+        _log(paths, "I", f"I. PPL = {ppl:.4f}")
+        return ppl
+    _log(paths, "I", f"I. WARN: no Final estimate in eval log (rc={rc})")
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_full_pipeline(cfg: PipelineConfig) -> Path:
+    """Run all 9 stages. Returns path to final GGUF."""
+    paths = WorkPaths.for_run(
+        root=cfg.output_root,
+        model_name=cfg.hf_model.replace("/", "__"),
+    )
+    paths.make()
+
+    print("=" * 70)
+    print(f"prismaquant-llama pipeline — run {paths.run_label}")
+    print("=" * 70)
+    for line in paths.summary_lines():
+        print(line)
+    print()
+
+    # A → B → C → D → E → F → G → H → I
+    hf_dir       = stage_a_download(cfg, paths)
+    bf16_path    = stage_b_convert(cfg, paths, hf_dir)
+    probe_path   = stage_c_probe(cfg, paths, hf_dir)
+    imatrix_path = stage_d_imatrix(cfg, paths, bf16_path)
+    costs_path   = stage_e_costs(cfg, paths, bf16_path, imatrix_path)
+    bridge_path  = stage_f_bridge(cfg, paths, probe_path)
+    recipe_path  = stage_g_allocate(cfg, paths, bridge_path, costs_path, bf16_path)
+    final_gguf   = stage_h_quantize(cfg, paths, bf16_path, recipe_path, imatrix_path)
+    ppl          = stage_i_eval(cfg, paths, final_gguf)
+
+    print()
+    print("=" * 70)
+    print(f"  ✓ DONE: {final_gguf}")
+    print(f"    size: {final_gguf.stat().st_size/1024**3:.2f} GB")
+    if ppl is not None:
+        print(f"    PPL:  {ppl:.4f}")
+    print(f"    logs: {paths.logs_dir}")
+    print("=" * 70)
+    return final_gguf
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI: `prismaquant-llama pipeline run|status`
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main(argv: Optional[list[str]] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="prismaquant-llama pipeline",
+        description="Direct pipeline exec without the wizard TUI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pr = sub.add_parser("run", help="run the full A→I pipeline")
+    pr.add_argument("--hf-model", required=True,
+                    help="HuggingFace model ID (e.g., google/gemma-4-E4B-it)")
+    pr.add_argument("--hf-revision", default="main")
+    pr.add_argument("--binary", type=Path, default=None,
+                    help="path to llama-quantize (default: auto-discover)")
+    pr.add_argument("--calibration", type=Path, required=True,
+                    help="calibration corpus text file (e.g., bartowski-calibration-v3.txt)")
+    pr.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    pr.add_argument("--budget-gb", type=float, required=True)
+    pr.add_argument("--budget-band-gb", type=float, default=0.25)
+    pr.add_argument("--priority", default="522",
+                    help="3-digit XYZ — X=PPL, Y=PP, Z=TG (default: 522)")
+    pr.add_argument("--formats",
+                    help="comma-separated format whitelist (default: 11-format prismaquant default)")
+    pr.add_argument("--chunks-imatrix", type=int, default=200)
+    pr.add_argument("--chunks-eval", type=int, default=100)
+    pr.add_argument("--ctx", type=int, default=4096)
+    pr.add_argument("--skip-eval", action="store_true",
+                    help="skip stage I (PPL eval)")
+    pr.add_argument("--convert-script", type=Path,
+                    help="path to convert_hf_to_gguf.py (default: auto-discover)")
+
+    args = p.parse_args(argv)
+
+    if args.cmd == "run":
+        cfg_kwargs = dict(
+            hf_model=args.hf_model, hf_revision=args.hf_revision,
+            binary=args.binary, calibration=args.calibration,
+            output_root=args.output,
+            budget_gb=args.budget_gb, budget_band_gb=args.budget_band_gb,
+            priority=args.priority,
+            chunks_imatrix=args.chunks_imatrix,
+            chunks_eval=args.chunks_eval,
+            ctx=args.ctx, skip_eval=args.skip_eval,
+            convert_script=args.convert_script,
+        )
+        if args.formats:
+            cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]
+        cfg = PipelineConfig(**cfg_kwargs)
+        try:
+            run_full_pipeline(cfg)
+            return 0
+        except SystemExit as e:
+            print(f"\nFAIL: {e}", file=sys.stderr)
+            return 1
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
