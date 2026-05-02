@@ -3,16 +3,16 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "prismaquant-wizard"
+name = "prismaquant-llama"
 version = "0.1.0a1"
-description = "Interactive TUI for customizing prismaquant GGUF builds — works with any prismaquant-enabled fork of llama.cpp"
+description = "Bring prismaquant's Bayesian per-tensor mixed-precision allocation to llama.cpp / GGUF — adapts the prismaquant allocator (originally targeted at vLLM) to work with any prismaquant-enabled fork of llama.cpp via a CLI + interactive TUI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Jeremy Jones", email = "jeremy@myfacetwittertube.com"},
 ]
-keywords = ["llama.cpp", "prismaquant", "quantization", "gguf", "tui", "wizard"]
+keywords = ["llama.cpp", "prismaquant", "quantization", "gguf", "tui", "mixed-precision", "allocator"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -39,18 +39,15 @@ dev = [
 ]
 
 [project.scripts]
-prismaquant-wizard = "wizard.wizard:main"
-prismaquant-wizard-discover = "wizard.format_discovery:main"
-prismaquant-wizard-calibrate = "wizard.calibration:main"
-prismaquant-wizard-paths = "wizard.paths:main"
+prismaquant-llama = "prismaquant_llama.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jimbothigpen/prismaquant-wizard"
-Issues = "https://github.com/jimbothigpen/prismaquant-wizard/issues"
-Documentation = "https://github.com/jimbothigpen/prismaquant-wizard#readme"
+Homepage = "https://github.com/jimbothigpen/prismaquant-llama"
+Issues = "https://github.com/jimbothigpen/prismaquant-llama/issues"
+Documentation = "https://github.com/jimbothigpen/prismaquant-llama#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-wizard = ["format_metadata_base.json"]
+prismaquant_llama = ["format_metadata_base.json"]
