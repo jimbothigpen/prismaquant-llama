@@ -127,6 +127,76 @@ def load_calibration_file(path: Path) -> CalibrationFile:
     return CalibrationFile.from_dict(json.loads(path.read_text()))
 
 
+def export_tps_subset(calib: CalibrationFile, output_path: Path) -> int:
+    """Extract `format-tps-<arch>.json` subset from a CalibrationFile.
+
+    Output shape (consumed by the allocator's --tps flag):
+
+        {
+          "_comment": "Per-format pp/tg throughput from calibrate-deep run",
+          "_reference_model": "<model name + sha>",
+          "_binary_sha256": "<binary sha>",
+          "_machine_id": "<host>",
+          "_calibrated_at": "<iso timestamp>",
+          "Q4_K":   {"pp": 336.60, "tg": 18.74},
+          "Q5_K":   {"pp": 344.99, "tg": 21.71},
+          ...
+        }
+
+    Only formats with both pp512_tps AND tg128_tps measured are emitted.
+    Returns the number of formats written.
+    """
+    out = {
+        "_comment": "Per-format pp/tg throughput from prismaquant-llama "
+                    "calibrate-deep. Used by the allocator's --tps flag.",
+        "_reference_model": (calib.header.ref_model
+                             or "(unknown)"),
+        "_reference_model_sha256": calib.header.ref_model_sha256,
+        "_reference_model_params": calib.header.ref_model_params,
+        "_binary_sha256": calib.header.binary_sha256,
+        "_machine_id": calib.header.machine_id,
+        "_calibrated_at": calib.header.calibrated_at,
+    }
+    n_emitted = 0
+    for fmt, m in calib.formats.items():
+        if m.pp512_tps is not None and m.tg128_tps is not None:
+            out[fmt] = {"pp": round(m.pp512_tps, 2),
+                        "tg": round(m.tg128_tps, 2)}
+            n_emitted += 1
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(out, indent=2))
+    return n_emitted
+
+
+def find_tps_file_for_binary(binary: Path,
+                              examples_dir: Optional[Path] = None) -> Optional[Path]:
+    """Resolve the best-available format-tps file for this binary.
+
+    Priority:
+        1. ~/.cache/prismaquant-llama/binary-types/<sha>-tps.json
+           (auto-generated from a calibrate-deep run on this binary)
+        2. <pkg>/examples/format-tps-<arch>.json
+           (static reference, hostname-matched)
+
+    Returns None if neither exists.
+    """
+    cache_dir = (Path.home() / ".cache" / "prismaquant-llama"
+                              / "binary-types")
+    cache_path = cache_dir / f"{_binary_sha256(binary)}-tps.json"
+    if cache_path.exists():
+        return cache_path
+    if examples_dir is not None:
+        import os
+        host = os.environ.get("HOSTNAME") or os.uname().nodename
+        host_to_arch = {"ai00": "gfx1150", "ai01": "gfx1102"}
+        arch = host_to_arch.get(host)
+        if arch:
+            cand = examples_dir / f"format-tps-{arch}.json"
+            if cand.exists():
+                return cand
+    return None
+
+
 def save_calibration_file(path: Path, calib: CalibrationFile) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(calib.to_dict(), indent=2, default=str))
@@ -449,6 +519,12 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
                 out.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    # After all formats measured, emit the format-tps subset so pipeline_runner
+    # auto-discovers it via find_tps_file_for_binary().
+    tps_path = output_path.parent / f"{output_path.stem.replace('-calibrated','')}-tps.json"
+    n = export_tps_subset(calib, tps_path)
+    log(f"[calibrate-deep] tps subset → {tps_path} ({n} formats)")
 
     return calib
 

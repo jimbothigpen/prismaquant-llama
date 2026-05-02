@@ -80,6 +80,9 @@ class PipelineConfig:
     convert_script: Optional[Path] = None  # auto-discover convert_hf_to_gguf.py
     pipeline_scripts_dir: Optional[Path] = None  # bundled bridge + allocator
     hsa_override: Optional[str] = None     # "11.0.2" for gfx1102/1103; auto-detect by hostname
+    tps_file: Optional[Path] = None        # per-format speed proxies for allocator's
+                                           # multi-objective scoring (TG/PP weights). When
+                                           # None, auto-discovers examples/format-tps-<arch>.json.
 
     def __post_init__(self):
         if self.binary is None:
@@ -100,6 +103,19 @@ class PipelineConfig:
             host = os.environ.get("HOSTNAME") or os.uname().nodename
             if host in ("ai01",):  # extend per fleet
                 self.hsa_override = "11.0.2"
+        # Auto-discover format-tps file: prefers binary-sha-keyed cache from a
+        # `calibrate deep` run on this exact binary, falls back to the static
+        # examples/format-tps-<arch>.json by hostname match. The cache provides
+        # per-format pp/tg throughput so the allocator's --priority XYZ weighting
+        # actually applies; without it, TG/PP terms collapse and priority
+        # effectively becomes 900 (pure-PPL) regardless of XYZ.
+        if self.tps_file is None:
+            try:
+                from .calibration import find_tps_file_for_binary
+            except ImportError:
+                from calibration import find_tps_file_for_binary  # type: ignore
+            examples_dir = Path(__file__).parents[2] / "examples"
+            self.tps_file = find_tps_file_for_binary(self.binary, examples_dir)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,7 +227,7 @@ def stage_b_convert(cfg: PipelineConfig, paths: WorkPaths, hf_dir: Path) -> Path
 # ─────────────────────────────────────────────────────────────────────────────
 
 def stage_c_probe(cfg: PipelineConfig, paths: WorkPaths, hf_dir: Path) -> Path:
-    probe_path = paths.probe_dir / f"{cfg.hf_model.replace('/', '__')}-probe.pkl"
+    probe_path = paths.probe_dir / f"{sanitize_model_name(cfg.hf_model)}-probe.pkl"
     if probe_path.exists():
         _log(paths, "C", f"C. probe.pkl cached at {probe_path} (skip)")
         return probe_path
@@ -346,20 +362,24 @@ def stage_g_allocate(cfg: PipelineConfig, paths: WorkPaths,
     pinned_path = paths.work / "pinned.json"
     pinned_path.write_text(json.dumps(cfg.pinned, indent=2))
     _log(paths, "G", f"G. allocating @ {cfg.budget_gb} GB priority {cfg.priority}")
-    rc = _run(
-        ["python3", str(allocator_script),
-         "--bridge", str(bridge_path),
-         "--costs", str(costs_path),
-         "--budget-gb", str(cfg.budget_gb),
-         "--budget-band-gb", str(cfg.budget_band_gb),
-         "--pinned", str(pinned_path),
-         "--recipe-out", str(recipe_path),
-         "--allow-types", ",".join(cfg.formats),
-         "--gguf", str(bf16_path),
-         "--propagate-from-exemplars",
-         "--exemplar-layers", "0,3"],
-        paths.logs_dir / "stage-G.log",
-    )
+    cmd = [
+        "python3", str(allocator_script),
+        "--bridge", str(bridge_path),
+        "--costs", str(costs_path),
+        "--budget-gb", str(cfg.budget_gb),
+        "--budget-band-gb", str(cfg.budget_band_gb),
+        "--pinned", str(pinned_path),
+        "--priority", str(cfg.priority),
+        "--recipe-out", str(recipe_path),
+        "--allow-types", ",".join(cfg.formats),
+        "--gguf", str(bf16_path),
+        "--propagate-from-exemplars",
+        "--exemplar-layers", "0,3",
+    ]
+    if cfg.tps_file is not None and cfg.tps_file.exists():
+        cmd += ["--tps", str(cfg.tps_file)]
+        _log(paths, "G", f"G. multi-objective TPS data: {cfg.tps_file}")
+    rc = _run(cmd, paths.logs_dir / "stage-G.log")
     if rc != 0 or not recipe_path.exists():
         raise SystemExit(f"FAIL: G allocator exit={rc}")
     _log(paths, "G", f"G. recipe: {recipe_path}")
@@ -526,6 +546,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="skip stage I (PPL eval)")
     pr.add_argument("--convert-script", type=Path,
                     help="path to convert_hf_to_gguf.py (default: auto-discover)")
+    pr.add_argument("--tps-file", type=Path, default=None,
+                    help="per-format pp/tg throughput JSON for the allocator's "
+                         "multi-objective scoring. Default: auto-discover "
+                         "examples/format-tps-<arch>.json by hostname. Without this, "
+                         "TG/PP weights in --priority XYZ have no data and the "
+                         "allocator collapses to pure-PPL.")
 
     args = p.parse_args(argv)
 
@@ -541,6 +567,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             chunks_eval=args.chunks_eval,
             ctx=args.ctx, skip_eval=args.skip_eval,
             convert_script=args.convert_script,
+            tps_file=args.tps_file,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]

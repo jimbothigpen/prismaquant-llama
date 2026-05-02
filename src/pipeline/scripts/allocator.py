@@ -87,11 +87,68 @@ def read_gguf_tensor_names(path: str) -> set[str]:
         return names
 
 
-def detect_layer_types(tensor_names: set[str]) -> dict[int, str]:
-    """For each layer index, classify as 'linear' (Gated-Delta-Net, has attn_qkv)
-    or 'softmax' (has attn_q/attn_k/attn_v separately)."""
-    by_layer = {}
-    for tn in tensor_names:
+def read_gguf_tensor_meta(path: str) -> dict[str, tuple]:
+    """Like read_gguf_tensor_names but also captures tensor SHAPES.
+
+    Returns {tensor_name: (ne[0], ne[1], ...)} where dims follow GGUF
+    convention: ne[0] is the inner / per-row width, ne[1] the outer / n_rows.
+    For a Linear weight saved as [in, out], ne[0]=in, ne[1]=out.
+
+    Shape data is what lets us distinguish iSWA layers (gemma-4) where
+    `attn_q.weight` has different ne[1] for full_attention vs sliding_attention.
+    """
+    GGUF_TYPES = {
+        4: ("u32", 4), 5: ("i32", 4), 6: ("f32", 4),
+        10: ("u64", 8), 11: ("i64", 8), 12: ("f64", 8),
+        7: ("bool", 1), 8: ("string", None), 9: ("array", None),
+        0: ("u8", 1), 1: ("i8", 1), 2: ("u16", 2), 3: ("i16", 2),
+    }
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != b"GGUF":
+            raise ValueError(f"Not a GGUF: {path}")
+        version, tensor_count, kv_count = struct.unpack("<IQQ", f.read(20))
+        def read_string():
+            n, = struct.unpack("<Q", f.read(8))
+            return f.read(n).decode("utf-8")
+        def skip_value(t):
+            name, size = GGUF_TYPES[t]
+            if name == "string":
+                read_string()
+            elif name == "array":
+                etype, n = struct.unpack("<IQ", f.read(12))
+                for _ in range(n):
+                    skip_value(etype)
+            else:
+                f.read(size)
+        for _ in range(kv_count):
+            read_string()
+            t, = struct.unpack("<I", f.read(4))
+            skip_value(t)
+        meta = {}
+        for _ in range(tensor_count):
+            tn = read_string()
+            n_dims, = struct.unpack("<I", f.read(4))
+            dims = struct.unpack(f"<{n_dims}Q", f.read(8 * n_dims))
+            f.read(4 + 8)  # type code + data offset
+            meta[tn] = dims
+        return meta
+
+
+def detect_layer_types(tensor_names_or_meta) -> dict[int, str]:
+    """For each layer index, classify by attention "shape signature" so that
+    iSWA architectures (gemma-3, gemma-4: full_attention vs sliding_attention
+    with different head_dim) get distinct types and don't share exemplars
+    across mismatched sizes.
+
+    Accepts either:
+      - set[str]: tensor name set (legacy — produces coarse 'linear'/'softmax' types)
+      - dict[str, tuple]: tensor_name → shape (preferred — produces shape-aware
+        types like 'softmax_q4096_k1024' that distinguish iSWA layer subtypes)
+    """
+    has_shapes = isinstance(tensor_names_or_meta, dict)
+    sigs_by_layer: dict[int, dict[str, tuple]] = {}
+    for tn in tensor_names_or_meta:
         if not tn.startswith("blk."):
             continue
         parts = tn.split(".", 2)
@@ -102,18 +159,63 @@ def detect_layer_types(tensor_names: set[str]) -> dict[int, str]:
         except ValueError:
             continue
         suffix = parts[2]
+        shape = tensor_names_or_meta[tn] if has_shapes else None
         if suffix.startswith("attn_qkv"):
-            by_layer[L] = "linear"
-        elif suffix.startswith("attn_q.") or suffix == "attn_q.weight":
-            by_layer.setdefault(L, "softmax")
-    return by_layer
+            sigs_by_layer.setdefault(L, {})["attn_qkv"] = shape
+        elif suffix == "attn_q.weight" or suffix.startswith("attn_q."):
+            sigs_by_layer.setdefault(L, {}).setdefault("attn_q", shape)
+        elif suffix == "attn_k.weight" or suffix.startswith("attn_k."):
+            sigs_by_layer.setdefault(L, {}).setdefault("attn_k", shape)
+
+    out = {}
+    for L, sigs in sigs_by_layer.items():
+        if "attn_qkv" in sigs:
+            # Linear-attention (Gated-Delta-Net / Mamba-2 / etc.); shape-tag if available
+            shp = sigs["attn_qkv"]
+            out[L] = f"linear_{shp[1]}" if shp else "linear"
+        elif "attn_q" in sigs:
+            q_shp = sigs["attn_q"]
+            k_shp = sigs.get("attn_k")
+            if q_shp and k_shp:
+                # Shape-aware tag distinguishes iSWA layer subtypes.
+                out[L] = f"softmax_q{q_shp[1]}_k{k_shp[1]}"
+            elif q_shp:
+                out[L] = f"softmax_q{q_shp[1]}"
+            else:
+                out[L] = "softmax"
+    return out
+
+
+def auto_pick_exemplar_layers(layer_type: dict[int, str],
+                              max_exemplars: int = 4) -> list[int]:
+    """Pick the smallest layer index for each distinct layer_type so the
+    exemplar set spans every shape signature in the model.
+
+    For pure-Llama (1 type), returns [0]. For iSWA (2 types, e.g. sliding +
+    full), returns [0, first_full_layer]. For Mamba+attention hybrids
+    (multiple types), returns up to max_exemplars representative layers.
+    """
+    seen = {}
+    for L in sorted(layer_type.keys()):
+        t = layer_type[L]
+        if t not in seen:
+            seen[t] = L
+            if len(seen) >= max_exemplars:
+                break
+    return sorted(seen.values())
 
 
 def propagate_costs(costs: dict, gguf_names: set[str],
-                    exemplar_layers: list[int]) -> tuple[dict, int]:
+                    exemplar_layers: list[int],
+                    layer_type: dict[int, str] | None = None) -> tuple[dict, int]:
     """Replicate cost data from exemplar tensors to peer-type tensors in
-    other layers. Returns (propagated_costs, n_propagated)."""
-    layer_type = detect_layer_types(gguf_names)
+    other layers. Returns (propagated_costs, n_propagated).
+
+    `layer_type` (optional, preferred): pre-computed layer→type mapping from
+    detect_layer_types(tensor_meta) so iSWA layers stay distinct. If omitted,
+    falls back to name-only classification (no shape distinguishing)."""
+    if layer_type is None:
+        layer_type = detect_layer_types(gguf_names)
     exemplar_for_type: dict[str, int] = {}
     for L in exemplar_layers:
         t = layer_type.get(L)
@@ -374,9 +476,26 @@ def main():
     if args.propagate_from_exemplars:
         if not args.gguf:
             ap.error("--propagate-from-exemplars requires --gguf")
-        gguf_names = read_gguf_tensor_names(args.gguf)
-        exemplars = [int(x) for x in args.exemplar_layers.split(",")]
-        costs, n_added = propagate_costs(costs, gguf_names, exemplars)
+        # Read tensor SHAPES (not just names) so detect_layer_types can
+        # distinguish iSWA layers (gemma-3, gemma-4) by attn_q output dim.
+        # Shape-aware tags ('softmax_q<n>_k<n>') prevent propagating sliding-
+        # attention sizes to full-attention layers and vice versa.
+        gguf_meta = read_gguf_tensor_meta(args.gguf)
+        gguf_names = set(gguf_meta.keys())
+        layer_type = detect_layer_types(gguf_meta)
+        # Auto-pick exemplars to cover every layer type unless --exemplar-layers
+        # was passed explicitly with non-default value.
+        if args.exemplar_layers == "0,3":
+            # Default value — replace with auto-detected coverage
+            exemplars = auto_pick_exemplar_layers(layer_type)
+            print(f"[allocator] auto-detected layer types: "
+                  f"{sorted(set(layer_type.values()))}", flush=True)
+            print(f"[allocator] auto-picked exemplar layers: {exemplars} "
+                  f"(one per shape signature)", flush=True)
+        else:
+            exemplars = [int(x) for x in args.exemplar_layers.split(",")]
+        costs, n_added = propagate_costs(costs, gguf_names, exemplars,
+                                          layer_type=layer_type)
         print(f"[allocator] propagated costs to {n_added} additional tensors "
               f"(exemplar layers: {exemplars})", flush=True)
         print(f"[allocator] costs after propagation: {len(costs)} tensors", flush=True)
