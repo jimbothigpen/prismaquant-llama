@@ -18,8 +18,13 @@ prismaquant-enabled fork** of [`ggml-org/llama.cpp`](https://github.com/ggml-org
 > mathematical core (prismaquant's closed-form Δloss surrogate) is
 > [RobTand](https://github.com/RobTand/prismaquant)'s work, not mine.
 
-> **Status: alpha / scaffold.** CLI dispatcher and TUI flow are wired;
-> end-to-end pipeline execution is still a stub. See [TODO list](#todo) below.
+> **Status: alpha / working preview.** End-to-end pipeline executes
+> through all nine stages (A→I) without manual intervention; format
+> auto-discovery + calibration + auto-budget defaults make typical use
+> a single command. The interactive TUI wrapper around the pipeline is
+> still scaffold (4 screens, no back-navigation yet) but the
+> `pipeline run` subcommand is the real thing. See
+> [What works today](#what-works-today) and [TODO list](#todo).
 
 ## What this does
 
@@ -72,33 +77,51 @@ matches the `--binary` directory).
 ## Quick run
 
 ```bash
-# Bare invocation drops you into the wizard (auto-discovers llama-quantize from $PATH)
-prismaquant-llama
+# Recommended: full pipeline, auto-budget (25% × BF16), equal-priority
+prismaquant-llama pipeline run \
+    --hf-model google/gemma-4-E4B-it \
+    --binary /path/to/your-fork/build/bin/llama-quantize \
+    --calibration /path/to/wikitext-or-bartowski.txt \
+    --output ~/prismaquant-builds
 
-# Explicit subcommand
-prismaquant-llama wizard --binary /path/to/your-fork/build/bin/llama-quantize
+# Same model, explicit budget + PPL-heavy priority
+prismaquant-llama pipeline run \
+    --hf-model google/gemma-4-E4B-it \
+    --binary /path/to/llama-quantize \
+    --calibration /path/to/calibration.txt \
+    --output ~/prismaquant-builds \
+    --budget-gb 4.5 --priority 522
 
-# Format auto-discovery against a specific binary
+# Re-run with different budgets — Stages A-D cache hit, runs in ~5-10 min
+prismaquant-llama pipeline run --hf-model google/gemma-4-E4B-it \
+    --calibration ... --output ~/prismaquant-builds --budget-gb 3.0
+prismaquant-llama pipeline run --hf-model google/gemma-4-E4B-it \
+    --calibration ... --output ~/prismaquant-builds --budget-gb 6.0
+
+# Format auto-discovery against a binary (no other files required)
 prismaquant-llama discover /path/to/llama-quantize
 
 # Empirical calibration — quick mode (~25 min for 53 formats)
 prismaquant-llama calibrate quick --binary /path/to/llama-quantize \
     --ref-model /path/to/Llama-3.2-1B-BF16.gguf --formats all
 
-# Show what dirs would be created for a given output root
+# Inspect the output dir layout that would be created for a given root + model
 prismaquant-llama paths layout --output ~/prismaquant-builds --model-name myModel
+
+# Bare invocation drops you into the (still-scaffold) wizard
+prismaquant-llama
 ```
 
 ## CLI subcommands
 
 | Command | Purpose |
 |---|---|
-| `prismaquant-llama` (no args) | drops you into the wizard (default) |
-| `prismaquant-llama wizard` | interactive TUI — explicit subcommand |
+| **`prismaquant-llama pipeline run`** | **End-to-end build (recommended).** Runs A→I with auto-budget + cache-aware re-runs. |
 | `prismaquant-llama discover` | auto-discover supported formats from a binary's `--help` |
 | `prismaquant-llama calibrate {quick,deep,ingest}` | empirical calibration; quick = size only (~25 min), deep = + PPL/bench (overnight), ingest = absorb prismaquant Stage D cost.csv |
 | `prismaquant-llama paths {layout,find-binaries}` | inspect output dir layout / discover llama.cpp tool binaries |
-| `prismaquant-llama pipeline` | (TODO) direct pipeline exec without the TUI |
+| `prismaquant-llama wizard` | (alpha) interactive TUI — currently the same 4-screen scaffold; production-quality TUI still TODO |
+| `prismaquant-llama` (no args) | drops you into the wizard (default) |
 
 Run `prismaquant-llama <subcommand> --help` for per-subcommand options.
 
@@ -201,21 +224,50 @@ prismaquant-llama/
 └── README.md (this file)
 ```
 
-## TODO
+## What works today
 
-The wizard is a scaffold. Outstanding work to make it production-ready:
+The `pipeline run` subcommand executes the full A→I sequence (download,
+convert, probe, imatrix, costs, bridge, allocate, quantize, eval) in
+one invocation. Each stage is idempotent and cache-aware — re-runs
+skip completed stages.
 
-- [ ] Wire `prismaquant-llama pipeline` to actually exec `src/pipeline/run-pipeline.sh`
-- [ ] HF download integration via `huggingface_hub.snapshot_download`
-- [ ] Calibration preset paths (auto-download wikitext-103 etc.)
-- [ ] Imatrix cache hit/miss detection (keyed by `(model_sha, corpus_sha, chunks)`)
-- [ ] Per-screen "back" navigation in the TUI
-- [ ] Architecture autodetect (peek at HF `config.json` to guess bridge model arch)
-- [ ] Recipe preview before execute (estimated time + disk + PPL prediction)
-- [ ] Error handling per stage (retry + diagnostic output)
-- [ ] End-to-end test against a small reference model
-- [ ] Parameterize `src/pipeline/*` scripts (replace hard-coded paths with env vars
-      — see `src/pipeline/PARAMETERIZATION-TODO.md`)
+```bash
+# Minimal invocation — auto-budget at 25% of BF16, equal-priority
+prismaquant-llama pipeline run \
+    --hf-model google/gemma-4-E4B-it \
+    --binary /path/to/your-fork/build/bin/llama-quantize \
+    --calibration /path/to/wikitext-or-bartowski.txt \
+    --output /path/to/output-root
+```
+
+| Capability | What it gives you |
+|---|---|
+| **Auto-budget** | Default `--budget-gb` derives 25% of the BF16 GGUF size after Stage B (slightly tighter than mainline IQ4_XS at ~28%). Override with explicit `--budget-gb`. |
+| **Equal-weight priority default** | `--priority 333` — neutral PPL/TG/PP weighting. Override with e.g. `522` for PPL-heavy or `252` for prefill-heavy. |
+| **Format auto-discovery** | Parses `<binary> --help` to learn what formats your fork supports. Heuristic-classifies unknown formats (bpw/family/source) so any fork works without metadata files. Curated `format_metadata_base.json` (ships) covers mainline; forks can drop in `format_metadata_<forkname>.json` for polish. |
+| **Convention-path metadata loading** | Forks place metadata at `<binary>/../../tools/prismaquant/format_metadata_*.json` and we pick it up automatically. Works for `frankenturbo2` reference fork. |
+| **Shared BF16 + imatrix caches** | First run pays the convert + imatrix cost; subsequent runs (different budgets/priorities, same model) skip straight to allocate + quantize. ~10-30 min saved per re-run. |
+| **Per-host HSA override** | Auto-applies `HSA_OVERRIDE_GFX_VERSION=11.0.2` on hostnames that need it (currently `ai01`-pattern; extend per fleet). Avoids manual env wrapping. |
+| **Per-stage logs** | `<work>/logs/stage-{A..I}.log` for each run. Pipeline failure points to the right log file in the error message. |
+| **Standalone subcommands** | `discover`, `calibrate quick/deep/ingest`, `paths layout/find-binaries`, `wizard` for users who only want one piece of the workflow. |
+
+### Validated end-to-end on
+
+- `google/gemma-4-E4B-it` (~4B effective, iSWA hybrid — required upstream prismaquant patches; see [`docs/gemma4-profile.md`](docs/gemma4-profile.md))
+- `unsloth/gpt-oss-20b-BF16` (~20B MoE — clean DefaultProfile path)
+- `Jackrong/Qwopus3.5-9B-v3.5` (~9B dense; original validation set, 28-row sweep across 3 budgets × 9 priorities)
+
+### TODO
+
+What's still missing for production-readiness:
+
+- [ ] **TUI wrapper** for `pipeline run` (subcommand exists; the 4-screen TUI front-end is still stub)
+- [ ] **Calibration preset paths** — auto-download wikitext-103, c4, the-pile by name (currently user passes a local file path)
+- [ ] **Architecture autodetect** in the TUI — peek at HF `config.json` to surface arch-specific notes (e.g. "this is a hybrid Mamba-2; expect probe to take longer")
+- [ ] **Recipe preview before execute** — show estimated final size + per-tensor format breakdown before Stage H runs
+- [ ] **Per-stage retry + better diagnostics** on transient failures
+- [ ] **prismaquant package upstream** — we ship local patches for Gemma-4 + NemotronH probe support ([`docs/gemma4-profile.md`](docs/gemma4-profile.md)); these need to land upstream at [`RobTand/prismaquant`](https://github.com/RobTand/prismaquant) before this project can `pip install` the unmodified package
+- [ ] **Parameterize `src/pipeline/*`** legacy shell scripts (largely superseded by `pipeline_runner.py`; keep for reference until removed)
 
 ## License
 
