@@ -207,6 +207,45 @@ def _auto_pick_stage_e_exemplars(bf16_path: Path) -> list[int]:
         return [0, 3]
 
 
+def _discover_top_level_weights(bf16_path: Path) -> list[str]:
+    """Scan the BF16 GGUF for top-level weight tensors (not under `blk.`)
+    that need to be in Stage E's measurement set. Without this, model-specific
+    weights like gemma-4's per_layer_token_embd.weight (5.38 GB BF16) get
+    skipped by Stage E → not in the recipe → fall back to the default
+    quantize-fallback format → recipe-size estimate is wrong AND quality
+    suffers (no allocator choice for the format).
+
+    Returns a list of tensor *base names* (e.g. ["token_embd", "output",
+    "per_layer_token_embd", "per_layer_model_proj"]) suitable for inclusion
+    in the Stage E include-regex's first alternation group.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).parents[1] / "pipeline" / "scripts"))
+        from allocator import read_gguf_tensor_meta
+        meta = read_gguf_tensor_meta(str(bf16_path))
+        names = set()
+        for tn, shape in meta.items():
+            # Top-level tensors have NO "blk." prefix and only one "." (between
+            # name and ".weight"). Skip 1D tensors (norms) — they stay F32 and
+            # don't need cost measurement.
+            if tn.startswith("blk."):
+                continue
+            if not tn.endswith(".weight"):
+                continue
+            if len(shape) < 2:
+                continue
+            base = tn[:-len(".weight")]
+            # base must be a plain identifier (no further dots)
+            if "." in base:
+                continue
+            names.add(base)
+        return sorted(names)
+    except Exception as e:
+        print(f"  WARN: top-level weight discovery failed ({e}); using "
+              f"[token_embd, output] default")
+        return ["token_embd", "output"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage A — download HF safetensors
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,9 +388,18 @@ def stage_e_costs(cfg: PipelineConfig, paths: WorkPaths,
     # for non-iSWA arches.
     exemplar_layers = _auto_pick_stage_e_exemplars(bf16_path)
     layer_alt = "|".join(str(L) for L in exemplar_layers)
-    include_regex = rf"^(token_embd|output|blk\.({layer_alt}))\."
+    # Auto-detect ALL top-level weight tensors (not just token_embd/output).
+    # This catches gemma-4's per_layer_token_embd.weight (5.38 GB BF16),
+    # NemotronH's embeddings.weight, etc. Without this, the allocator's
+    # recipe-size estimate is missing these tensors → wrong by GB on some
+    # archs.
+    top_level = _discover_top_level_weights(bf16_path)
+    top_level_alt = "|".join(top_level)
+    include_regex = rf"^({top_level_alt}|blk\.({layer_alt}))\."
     _log(paths, "E", f"E. measuring per-(tensor, format) MSE → {costs_path}")
-    _log(paths, "E", f"E. exemplar layers: {exemplar_layers} (include-regex: {include_regex})")
+    _log(paths, "E", f"E. top-level weights: {top_level}")
+    _log(paths, "E", f"E. exemplar layers: {exemplar_layers}")
+    _log(paths, "E", f"E. include-regex: {include_regex}")
     rc = _run(
         [str(cost_bin),
          "--model", str(bf16_path),
