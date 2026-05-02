@@ -47,6 +47,28 @@ pip install --user prismaquant-llama          # once published to PyPI
 pip install -e .
 ```
 
+### Required external dependencies
+
+prismaquant-llama is a pure-Python orchestrator; it shells out to
+several external tools that must be present on `$PATH` (or pointed at
+via `--binary`). One of these is custom and must be built against your
+llama.cpp fork.
+
+| Tool | Source | Notes |
+|---|---|---|
+| `llama-quantize` | your llama.cpp fork | standard mainline tool |
+| `llama-imatrix` | your llama.cpp fork | standard mainline tool |
+| `llama-perplexity` | your llama.cpp fork | standard mainline tool |
+| `llama-bench` | your llama.cpp fork | standard mainline tool |
+| `llama-quantize-cost` | **see [`src/pipeline/cpp/quantize-cost/`](src/pipeline/cpp/quantize-cost/)** | not yet upstream — drop the source into your llama.cpp tree and rebuild with `-DGGML_BUILD_TOOLS=ON`. The README in that directory has full instructions. |
+| `prismaquant` Python package | [RobTand/prismaquant](https://github.com/RobTand/prismaquant) | provides `prismaquant.incremental_probe` for the Hessian probe stage. Install with `pip install -e <local-checkout>`. |
+
+If your fork already ships `llama-quantize-cost` (e.g.,
+[`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2)
+at `tools/quantize-cost/`), you don't need to copy anything — just
+ensure that fork's `build/bin/llama-quantize-cost` is on `$PATH` (or
+matches the `--binary` directory).
+
 ## Quick run
 
 ```bash
