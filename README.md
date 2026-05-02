@@ -66,7 +66,7 @@ llama.cpp fork.
 | `llama-perplexity` | your llama.cpp fork | standard mainline tool |
 | `llama-bench` | your llama.cpp fork | standard mainline tool |
 | `llama-quantize-cost` | **see [`src/pipeline/cpp/quantize-cost/`](src/pipeline/cpp/quantize-cost/)** | not yet upstream — drop the source into your llama.cpp tree and rebuild with `-DGGML_BUILD_TOOLS=ON`. The README in that directory has full instructions. |
-| `prismaquant` Python package | **[`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant) (`prismaquant-llama-compat` branch)** | provides `prismaquant.incremental_probe` for the Hessian probe stage. **Use this fork** rather than upstream `RobTand/prismaquant` — the fork carries patches needed for Gemma-4 (iSWA, kv-sharing) and NemotronH (Mamba-2 hybrid) architectures. See [`FORK-NOTES.md`](https://github.com/jimbothigpen/prismaquant/blob/prismaquant-llama-compat/FORK-NOTES.md) for the full patch list. Install: `pip install git+https://github.com/jimbothigpen/prismaquant.git@prismaquant-llama-compat` |
+| `prismaquant` Python package | **[`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant)** | provides `prismaquant.incremental_probe` for the Hessian probe stage. **Use this fork** rather than upstream `RobTand/prismaquant` — the fork carries patches needed for Gemma-4 (iSWA, kv-sharing) and NemotronH (Mamba-2 hybrid) architectures. See [`FORK-NOTES.md`](https://github.com/jimbothigpen/prismaquant/blob/main/FORK-NOTES.md) for the full patch list. Install: `pip install git+https://github.com/jimbothigpen/prismaquant.git` |
 
 If your fork already ships `llama-quantize-cost` (e.g.,
 [`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2)
@@ -266,7 +266,7 @@ What's still missing for production-readiness:
 - [ ] **Architecture autodetect** in the TUI — peek at HF `config.json` to surface arch-specific notes (e.g. "this is a hybrid Mamba-2; expect probe to take longer")
 - [ ] **Recipe preview before execute** — show estimated final size + per-tensor format breakdown before Stage H runs
 - [ ] **Per-stage retry + better diagnostics** on transient failures
-- [ ] **prismaquant upstream PRs** — our [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant) fork carries 8 generic + 1 architecture-specific patch ([`FORK-NOTES.md`](https://github.com/jimbothigpen/prismaquant/blob/prismaquant-llama-compat/FORK-NOTES.md)). Generic patches are clean upstream candidates; PRs deferred until prismaquant-llama gets a few weeks of in-use validation
+- [ ] **prismaquant upstream PRs** — our [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant) fork carries 8 generic + 1 architecture-specific patch ([`FORK-NOTES.md`](https://github.com/jimbothigpen/prismaquant/blob/main/FORK-NOTES.md)). Generic patches are clean upstream candidates; PRs deferred until prismaquant-llama gets a few weeks of in-use validation
 - [ ] **Parameterize `src/pipeline/*`** legacy shell scripts (largely superseded by `pipeline_runner.py`; keep for reference until removed)
 
 ## License
