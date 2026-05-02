@@ -82,7 +82,10 @@ class PipelineConfig:
     hsa_override: Optional[str] = None     # "11.0.2" for gfx1102/1103; auto-detect by hostname
     tps_file: Optional[Path] = None        # per-format speed proxies for allocator's
                                            # multi-objective scoring (TG/PP weights). When
-                                           # None, auto-discovers examples/format-tps-<arch>.json.
+                                           # None, auto-discovers via find_tps_file_for_binary().
+    default_tps_override: Optional[Path] = None  # user's "my preferred default" tps file;
+                                                 # used as fallback before package examples.
+                                                 # Can also be set via PRISMAQUANT_DEFAULT_TPS env var.
 
     def __post_init__(self):
         if self.binary is None:
@@ -115,7 +118,11 @@ class PipelineConfig:
             except ImportError:
                 from calibration import find_tps_file_for_binary  # type: ignore
             examples_dir = Path(__file__).parents[2] / "examples"
-            self.tps_file = find_tps_file_for_binary(self.binary, examples_dir)
+            self.tps_file = find_tps_file_for_binary(
+                self.binary,
+                examples_dir,
+                default_tps_override=self.default_tps_override,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -548,10 +555,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="path to convert_hf_to_gguf.py (default: auto-discover)")
     pr.add_argument("--tps-file", type=Path, default=None,
                     help="per-format pp/tg throughput JSON for the allocator's "
-                         "multi-objective scoring. Default: auto-discover "
-                         "examples/format-tps-<arch>.json by hostname. Without this, "
+                         "multi-objective scoring. Default: auto-discover via "
+                         "find_tps_file_for_binary (binary-sha cache → "
+                         "--default-tps → package examples). Without this, "
                          "TG/PP weights in --priority XYZ have no data and the "
                          "allocator collapses to pure-PPL.")
+    pr.add_argument("--default-tps", type=Path, default=None,
+                    help="user's preferred default tps file (overrides the "
+                         "package-shipped examples/format-tps-<arch>.json but "
+                         "is overridden by the per-binary cache and explicit "
+                         "--tps-file). Can also be set via PRISMAQUANT_DEFAULT_TPS "
+                         "env var.")
 
     args = p.parse_args(argv)
 
@@ -568,6 +582,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             ctx=args.ctx, skip_eval=args.skip_eval,
             convert_script=args.convert_script,
             tps_file=args.tps_file,
+            default_tps_override=args.default_tps,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]

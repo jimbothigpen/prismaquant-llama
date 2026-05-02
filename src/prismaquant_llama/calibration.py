@@ -169,24 +169,40 @@ def export_tps_subset(calib: CalibrationFile, output_path: Path) -> int:
 
 
 def find_tps_file_for_binary(binary: Path,
-                              examples_dir: Optional[Path] = None) -> Optional[Path]:
+                              examples_dir: Optional[Path] = None,
+                              default_tps_override: Optional[Path] = None,
+                              ) -> Optional[Path]:
     """Resolve the best-available format-tps file for this binary.
 
-    Priority:
-        1. ~/.cache/prismaquant-llama/binary-types/<sha>-tps.json
-           (auto-generated from a calibrate-deep run on this binary)
-        2. <pkg>/examples/format-tps-<arch>.json
-           (static reference, hostname-matched)
+    Priority (highest → lowest):
+        1. `~/.cache/prismaquant-llama/binary-types/<sha>-tps.json` —
+           auto-generated from a `calibrate deep` run on this exact binary.
+           Most specific; always wins when present.
+        2. `default_tps_override` — user-supplied "my preferred default"
+           via `--default-tps` flag or `PRISMAQUANT_DEFAULT_TPS` env var.
+           Use this for cross-binary defaults (e.g., the user calibrated
+           one binary build and wants those numbers used as the default
+           for newer builds until they re-calibrate).
+        3. `<pkg>/examples/format-tps-<arch>.json` — package-shipped
+           static reference, hostname-matched.
 
-    Returns None if neither exists.
+    Returns None if no candidate file exists.
     """
+    import os
     cache_dir = (Path.home() / ".cache" / "prismaquant-llama"
                               / "binary-types")
     cache_path = cache_dir / f"{_binary_sha256(binary)}-tps.json"
     if cache_path.exists():
         return cache_path
+    # User local default (CLI flag or env var)
+    if default_tps_override is None:
+        env_override = os.environ.get("PRISMAQUANT_DEFAULT_TPS")
+        if env_override:
+            default_tps_override = Path(env_override)
+    if default_tps_override is not None and default_tps_override.exists():
+        return default_tps_override
+    # Package-shipped examples by hostname → arch
     if examples_dir is not None:
-        import os
         host = os.environ.get("HOSTNAME") or os.uname().nodename
         host_to_arch = {"ai00": "gfx1150", "ai01": "gfx1102"}
         arch = host_to_arch.get(host)
