@@ -20,7 +20,10 @@ CLI:
         --binary /path/to/llama-quantize \\
         --calibration /path/to/wikitext.txt \\
         --output ~/prismaquant-builds \\
-        --budget-gb 1.5 --priority 522
+        --priority 333
+
+When --budget-gb is omitted, defaults to 25% of the BF16 GGUF size (slightly
+tighter than mainline IQ4_XS at 27-29% real-world).
 
 Status: scaffold — subprocess wiring complete, end-to-end run not yet
 verified (waits on a free GPU for Stage C/D/E/H).
@@ -56,9 +59,11 @@ class PipelineConfig:
     binary: Optional[Path] = None     # auto-discovered if None
     calibration: Optional[Path] = None
     output_root: Path = DEFAULT_OUTPUT_ROOT
-    budget_gb: float = 5.25
-    priority: str = "522"
+    budget_gb: Optional[float] = None  # None → auto (0.25 × BF16 GGUF size)
+    priority: str = "333"
     budget_band_gb: float = 0.25
+    budget_auto_ratio: float = 0.25     # used when budget_gb is None — 25% of BF16
+                                        # ≈ slightly tighter than IQ4_XS (27-29% real-world)
     formats: list[str] = field(default_factory=lambda: [
         "Q4_K", "Q5_K", "Q6_K", "Q8_0",
         "IQ4_XS", "IQ4_K", "IQ4_KS", "IQ4_KSS",
@@ -455,6 +460,13 @@ def run_full_pipeline(cfg: PipelineConfig) -> Path:
     # A → B → C → D → E → F → G → H → I
     hf_dir       = stage_a_download(cfg, paths)
     bf16_path    = stage_b_convert(cfg, paths, hf_dir)
+    # Auto-budget: derive after Stage B once BF16 size is known.
+    if cfg.budget_gb is None:
+        bf16_gb = bf16_path.stat().st_size / 1024**3
+        cfg.budget_gb = round(bf16_gb * cfg.budget_auto_ratio, 2)
+        _log(paths, "B",
+             f"B. auto-budget: BF16={bf16_gb:.2f} GB × {cfg.budget_auto_ratio:.0%} "
+             f"= {cfg.budget_gb} GB target (override with --budget-gb)")
     probe_path   = stage_c_probe(cfg, paths, hf_dir)
     imatrix_path = stage_d_imatrix(cfg, paths, bf16_path)
     costs_path   = stage_e_costs(cfg, paths, bf16_path, imatrix_path)
@@ -493,10 +505,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr.add_argument("--calibration", type=Path, required=True,
                     help="calibration corpus text file (e.g., bartowski-calibration-v3.txt)")
     pr.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    pr.add_argument("--budget-gb", type=float, required=True)
-    pr.add_argument("--budget-band-gb", type=float, default=0.25)
-    pr.add_argument("--priority", default="522",
-                    help="3-digit XYZ — X=PPL, Y=PP, Z=TG (default: 522)")
+    pr.add_argument("--budget-gb", type=float, default=None,
+                    help="target GGUF size in GB. Default: auto = 25%% of BF16 GGUF "
+                         "size (computed after Stage B). 25%% is slightly tighter "
+                         "than mainline IQ4_XS (~27-29%% real-world), trading a bit "
+                         "of size for the prismaquant per-tensor allocation win.")
+    pr.add_argument("--budget-auto-ratio", type=float, default=0.25,
+                    help="when --budget-gb is unset, target this fraction of the "
+                         "BF16 GGUF size (default: 0.25)")
+    pr.add_argument("--budget-band-gb", type=float, default=0.25,
+                    help="allocator's wiggle room around --budget-gb (default: ±0.25 GB)")
+    pr.add_argument("--priority", default="333",
+                    help="3-digit XYZ — X=PPL, Y=TG, Z=PP (default: 333 = equal weight)")
     pr.add_argument("--formats",
                     help="comma-separated format whitelist (default: 11-format prismaquant default)")
     pr.add_argument("--chunks-imatrix", type=int, default=200)
@@ -515,6 +535,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             binary=args.binary, calibration=args.calibration,
             output_root=args.output,
             budget_gb=args.budget_gb, budget_band_gb=args.budget_band_gb,
+            budget_auto_ratio=args.budget_auto_ratio,
             priority=args.priority,
             chunks_imatrix=args.chunks_imatrix,
             chunks_eval=args.chunks_eval,

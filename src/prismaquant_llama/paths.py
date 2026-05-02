@@ -184,7 +184,7 @@ class WorkPaths:
             imatrix_cache=(imatrix_cache_override or (shared / "imatrix-cache")).expanduser().resolve(),
             ggufs=ggufs,
             work=work,
-            bf16_dir=work / "bf16",
+            bf16_dir=shared / "bf16",
             probe_dir=work / "probe",
             imatrix_dir=work / "imatrix",
             costs_dir=work / "costs",
