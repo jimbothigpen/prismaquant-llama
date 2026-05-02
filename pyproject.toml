@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prismaquant-wizard"
+version = "0.1.0a1"
+description = "Interactive TUI for customizing prismaquant GGUF builds — works with any prismaquant-enabled fork of llama.cpp"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Jeremy Jones", email = "jeremy@myfacetwittertube.com"},
+]
+keywords = ["llama.cpp", "prismaquant", "quantization", "gguf", "tui", "wizard"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "InquirerPy>=0.3.4",
+    "huggingface_hub>=0.20",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+prismaquant-wizard = "wizard.wizard:main"
+prismaquant-wizard-discover = "wizard.format_discovery:main"
+prismaquant-wizard-calibrate = "wizard.calibration:main"
+prismaquant-wizard-paths = "wizard.paths:main"
+
+[project.urls]
+Homepage = "https://github.com/jimbothigpen/prismaquant-wizard"
+Issues = "https://github.com/jimbothigpen/prismaquant-wizard/issues"
+Documentation = "https://github.com/jimbothigpen/prismaquant-wizard#readme"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+wizard = ["format_metadata_base.json"]

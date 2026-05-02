@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Wizard cache (should never be in repo)
+.cache/
