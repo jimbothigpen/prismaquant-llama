@@ -219,7 +219,7 @@ class WorkPaths:
             ggufs=ggufs,
             work=work,
             bf16_dir=shared / "bf16",
-            probe_dir=work / "probe",
+            probe_dir=shared / "probe",
             imatrix_dir=work / "imatrix",
             costs_dir=work / "costs",
             recipes_dir=work / "recipes",

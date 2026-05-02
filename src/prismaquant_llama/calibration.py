@@ -86,7 +86,23 @@ class CalibrationHeader:
 @dataclass
 class FormatMeasurement:
     """Per-format calibration result. All fields optional — different
-    modes populate different subsets."""
+    modes populate different subsets.
+
+    The format-perf subset emitted via export_format_perf_subset() carries
+    a stable schema documented below. The CalibrationFile (this class) is
+    the richer superset.
+
+    format-perf schema (consumed by allocator's --tps flag):
+        Required: pp (≡ pp512_tps), tg (≡ tg128_tps)
+        Reserved future keys (not yet emitted; reader should ignore unknown):
+          - lat_p99_ms       — 99th-percentile decode latency (ms/token)
+          - mem_gb_per_param — runtime memory footprint per param
+          - ppl_delta_vs_f16 — quality penalty signal (could let allocator
+                               hard-skip a format whose Δ exceeds a bound)
+          - compatible       — explicit per-format compatibility flag
+                               (e.g. False if architecture's tensor shape
+                               can't be quantized to this format at all)
+    """
     bpw: Optional[float] = None
     size_bytes: Optional[int] = None
     quantize_wallclock_sec: Optional[float] = None
@@ -96,6 +112,10 @@ class FormatMeasurement:
     pp512_tps: Optional[float] = None
     tg128_tps: Optional[float] = None
     bench_wallclock_sec: Optional[float] = None
+    # Reserved for future schema extensions; not yet measured.
+    lat_p99_ms: Optional[float] = None
+    mem_gb_per_param: Optional[float] = None
+    compatible: Optional[bool] = None
     error: Optional[str] = None
 
 
@@ -127,7 +147,7 @@ def load_calibration_file(path: Path) -> CalibrationFile:
     return CalibrationFile.from_dict(json.loads(path.read_text()))
 
 
-def export_tps_subset(calib: CalibrationFile, output_path: Path) -> int:
+def export_format_perf_subset(calib: CalibrationFile, output_path: Path) -> int:
     """Extract `format-tps-<arch>.json` subset from a CalibrationFile.
 
     Output shape (consumed by the allocator's --tps flag):
@@ -168,48 +188,54 @@ def export_tps_subset(calib: CalibrationFile, output_path: Path) -> int:
     return n_emitted
 
 
-def find_tps_file_for_binary(binary: Path,
+def find_format_perf_file_for_binary(binary: Path,
                               examples_dir: Optional[Path] = None,
-                              default_tps_override: Optional[Path] = None,
+                              default_format_perf_override: Optional[Path] = None,
                               ) -> Optional[Path]:
-    """Resolve the best-available format-tps file for this binary.
+    """Resolve the best-available format-perf file for this binary.
 
     Priority (highest → lowest):
-        1. `~/.cache/prismaquant-llama/binary-types/<sha>-tps.json` —
-           auto-generated from a `calibrate deep` run on this exact binary.
-           Most specific; always wins when present.
-        2. `default_tps_override` — user-supplied "my preferred default"
-           via `--default-tps` flag or `PRISMAQUANT_DEFAULT_TPS` env var.
-           Use this for cross-binary defaults (e.g., the user calibrated
-           one binary build and wants those numbers used as the default
-           for newer builds until they re-calibrate).
-        3. `<pkg>/examples/format-tps-<arch>.json` — package-shipped
-           static reference, hostname-matched.
+        1. `~/.cache/prismaquant-llama/binary-types/<sha-prefix>-perf.json`
+           (or legacy `-tps.json`) — auto-generated from a `calibrate deep`
+           run on this exact binary. Most specific; always wins when present.
+        2. `default_format_perf_override` — user-supplied "my preferred default"
+           via `--default-format-perf` flag or PRISMAQUANT_DEFAULT_FORMAT_PERF
+           env var. Use this for cross-binary defaults (e.g., the user
+           calibrated one binary build and wants those numbers used as the
+           default for newer builds until they re-calibrate).
+        3. `<pkg>/examples/format-perf-<arch>.json` (or legacy `format-tps-`) —
+           package-shipped static reference, hostname-matched.
 
     Returns None if no candidate file exists.
     """
     import os
     cache_dir = (Path.home() / ".cache" / "prismaquant-llama"
                               / "binary-types")
-    cache_path = cache_dir / f"{_binary_sha256(binary)}-tps.json"
-    if cache_path.exists():
-        return cache_path
+    sha = _binary_sha256(binary)
+    sha_short = sha[:16]
+    # Try new name first, then legacy. Both full + 16-char-prefix.
+    for name in (f"{sha_short}-perf.json", f"{sha}-perf.json",
+                 f"{sha_short}-tps.json", f"{sha}-tps.json"):
+        cand = cache_dir / name
+        if cand.exists():
+            return cand
     # User local default (CLI flag or env var)
-    if default_tps_override is None:
-        env_override = os.environ.get("PRISMAQUANT_DEFAULT_TPS")
+    if default_format_perf_override is None:
+        env_override = os.environ.get("PRISMAQUANT_DEFAULT_FORMAT_PERF")
         if env_override:
-            default_tps_override = Path(env_override)
-    if default_tps_override is not None and default_tps_override.exists():
-        return default_tps_override
-    # Package-shipped examples by hostname → arch
+            default_format_perf_override = Path(env_override)
+    if default_format_perf_override is not None and default_format_perf_override.exists():
+        return default_format_perf_override
+    # Package-shipped examples by hostname → arch (new + legacy names)
     if examples_dir is not None:
         host = os.environ.get("HOSTNAME") or os.uname().nodename
         host_to_arch = {"ai00": "gfx1150", "ai01": "gfx1102"}
         arch = host_to_arch.get(host)
         if arch:
-            cand = examples_dir / f"format-tps-{arch}.json"
-            if cand.exists():
-                return cand
+            for fname in (f"format-perf-{arch}.json", f"format-tps-{arch}.json"):
+                cand = examples_dir / fname
+                if cand.exists():
+                    return cand
     return None
 
 
@@ -536,11 +562,11 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
             except OSError:
                 pass
 
-    # After all formats measured, emit the format-tps subset so pipeline_runner
-    # auto-discovers it via find_tps_file_for_binary().
-    tps_path = output_path.parent / f"{output_path.stem.replace('-calibrated','')}-tps.json"
-    n = export_tps_subset(calib, tps_path)
-    log(f"[calibrate-deep] tps subset → {tps_path} ({n} formats)")
+    # After all formats measured, emit the format-perf subset so pipeline_runner
+    # auto-discovers it via find_format_perf_file_for_binary().
+    perf_path = output_path.parent / f"{output_path.stem.replace('-calibrated','')}-perf.json"
+    n = export_format_perf_subset(calib, perf_path)
+    log(f"[calibrate-deep] format-perf subset → {perf_path} ({n} formats)")
 
     return calib
 

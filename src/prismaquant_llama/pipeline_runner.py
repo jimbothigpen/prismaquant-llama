@@ -80,12 +80,12 @@ class PipelineConfig:
     convert_script: Optional[Path] = None  # auto-discover convert_hf_to_gguf.py
     pipeline_scripts_dir: Optional[Path] = None  # bundled bridge + allocator
     hsa_override: Optional[str] = None     # "11.0.2" for gfx1102/1103; auto-detect by hostname
-    tps_file: Optional[Path] = None        # per-format speed proxies for allocator's
+    format_perf_file: Optional[Path] = None        # per-format speed proxies for allocator's
                                            # multi-objective scoring (TG/PP weights). When
-                                           # None, auto-discovers via find_tps_file_for_binary().
-    default_tps_override: Optional[Path] = None  # user's "my preferred default" tps file;
+                                           # None, auto-discovers via find_format_perf_file_for_binary().
+    default_format_perf_override: Optional[Path] = None  # user's "my preferred default" tps file;
                                                  # used as fallback before package examples.
-                                                 # Can also be set via PRISMAQUANT_DEFAULT_TPS env var.
+                                                 # Can also be set via PRISMAQUANT_DEFAULT_FORMAT_PERF env var.
 
     def __post_init__(self):
         if self.binary is None:
@@ -106,22 +106,22 @@ class PipelineConfig:
             host = os.environ.get("HOSTNAME") or os.uname().nodename
             if host in ("ai01",):  # extend per fleet
                 self.hsa_override = "11.0.2"
-        # Auto-discover format-tps file: prefers binary-sha-keyed cache from a
+        # Auto-discover format-perf file: prefers binary-sha-keyed cache from a
         # `calibrate deep` run on this exact binary, falls back to the static
-        # examples/format-tps-<arch>.json by hostname match. The cache provides
+        # examples/format-perf-<arch>.json by hostname match. The cache provides
         # per-format pp/tg throughput so the allocator's --priority XYZ weighting
         # actually applies; without it, TG/PP terms collapse and priority
         # effectively becomes 900 (pure-PPL) regardless of XYZ.
-        if self.tps_file is None:
+        if self.format_perf_file is None:
             try:
-                from .calibration import find_tps_file_for_binary
+                from .calibration import find_format_perf_file_for_binary
             except ImportError:
-                from calibration import find_tps_file_for_binary  # type: ignore
+                from calibration import find_format_perf_file_for_binary  # type: ignore
             examples_dir = Path(__file__).parents[2] / "examples"
-            self.tps_file = find_tps_file_for_binary(
+            self.format_perf_file = find_format_perf_file_for_binary(
                 self.binary,
                 examples_dir,
-                default_tps_override=self.default_tps_override,
+                default_format_perf_override=self.default_format_perf_override,
             )
 
 
@@ -383,9 +383,9 @@ def stage_g_allocate(cfg: PipelineConfig, paths: WorkPaths,
         "--propagate-from-exemplars",
         "--exemplar-layers", "0,3",
     ]
-    if cfg.tps_file is not None and cfg.tps_file.exists():
-        cmd += ["--tps", str(cfg.tps_file)]
-        _log(paths, "G", f"G. multi-objective TPS data: {cfg.tps_file}")
+    if cfg.format_perf_file is not None and cfg.format_perf_file.exists():
+        cmd += ["--tps", str(cfg.format_perf_file)]
+        _log(paths, "G", f"G. multi-objective TPS data: {cfg.format_perf_file}")
     rc = _run(cmd, paths.logs_dir / "stage-G.log")
     if rc != 0 or not recipe_path.exists():
         raise SystemExit(f"FAIL: G allocator exit={rc}")
@@ -553,19 +553,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="skip stage I (PPL eval)")
     pr.add_argument("--convert-script", type=Path,
                     help="path to convert_hf_to_gguf.py (default: auto-discover)")
-    pr.add_argument("--tps-file", type=Path, default=None,
-                    help="per-format pp/tg throughput JSON for the allocator's "
-                         "multi-objective scoring. Default: auto-discover via "
-                         "find_tps_file_for_binary (binary-sha cache → "
-                         "--default-tps → package examples). Without this, "
-                         "TG/PP weights in --priority XYZ have no data and the "
-                         "allocator collapses to pure-PPL.")
-    pr.add_argument("--default-tps", type=Path, default=None,
-                    help="user's preferred default tps file (overrides the "
-                         "package-shipped examples/format-tps-<arch>.json but "
+    pr.add_argument("--format-perf", "--tps-file", type=Path, default=None,
+                    dest="format_perf",
+                    help="per-format performance characteristics JSON (currently "
+                         "pp/tg throughput; reserved keys for latency, mem footprint, "
+                         "etc.). Consumed by the allocator's multi-objective scoring. "
+                         "Default: auto-discover via find_format_perf_file_for_binary "
+                         "(binary-sha cache → --default-format-perf → package examples). "
+                         "Without this, TG/PP weights in --priority XYZ have no data "
+                         "and the allocator collapses to pure-PPL. "
+                         "Legacy alias: --tps-file (deprecated).")
+    pr.add_argument("--default-format-perf", "--default-tps", type=Path, default=None,
+                    dest="default_format_perf",
+                    help="user's preferred default format-perf file (overrides the "
+                         "package-shipped examples/format-perf-<arch>.json but "
                          "is overridden by the per-binary cache and explicit "
-                         "--tps-file). Can also be set via PRISMAQUANT_DEFAULT_TPS "
-                         "env var.")
+                         "--format-perf). Can also be set via PRISMAQUANT_DEFAULT_FORMAT_PERF "
+                         "env var. Legacy alias: --default-tps (deprecated).")
 
     args = p.parse_args(argv)
 
@@ -581,8 +585,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             chunks_eval=args.chunks_eval,
             ctx=args.ctx, skip_eval=args.skip_eval,
             convert_script=args.convert_script,
-            tps_file=args.tps_file,
-            default_tps_override=args.default_tps,
+            format_perf_file=args.format_perf,
+            default_format_perf_override=args.default_format_perf,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]
