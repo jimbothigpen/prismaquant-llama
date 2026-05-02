@@ -148,27 +148,42 @@ def load_calibration_file(path: Path) -> CalibrationFile:
 
 
 def export_format_perf_subset(calib: CalibrationFile, output_path: Path) -> int:
-    """Extract `format-tps-<arch>.json` subset from a CalibrationFile.
+    """Extract format-perf subset from a CalibrationFile.
 
-    Output shape (consumed by the allocator's --tps flag):
+    Output shape (consumed by the allocator's --tps flag and any future
+    consumers of per-format quality signals):
 
         {
-          "_comment": "Per-format pp/tg throughput from calibrate-deep run",
+          "_comment": "Per-format perf characteristics from calibrate-deep run",
           "_reference_model": "<model name + sha>",
           "_binary_sha256": "<binary sha>",
           "_machine_id": "<host>",
           "_calibrated_at": "<iso timestamp>",
-          "Q4_K":   {"pp": 336.60, "tg": 18.74},
-          "Q5_K":   {"pp": 344.99, "tg": 21.71},
+          "_schema_version": 2,
+          "Q4_K": {
+            "pp": 336.60,                  # PP512 tps
+            "tg": 18.74,                   # TG128 tps
+            "ppl": 6.92,                   # absolute PPL on the calibration corpus
+            "ppl_delta_vs_f16": 0.094,     # quality penalty vs F16 baseline
+            "bpw": 4.5106                  # bits per weight on this binary
+          },
           ...
         }
 
-    Only formats with both pp512_tps AND tg128_tps measured are emitted.
+    Schema notes:
+      - v1: pp + tg only
+      - v2: adds ppl, ppl_delta_vs_f16, bpw (this version)
+      - Reserved future keys: lat_p99_ms, mem_gb_per_param, compatible
+
+    Only formats with at minimum pp512_tps AND tg128_tps measured are
+    emitted. Other fields are omitted per-format if not measured.
     Returns the number of formats written.
     """
     out = {
-        "_comment": "Per-format pp/tg throughput from prismaquant-llama "
-                    "calibrate-deep. Used by the allocator's --tps flag.",
+        "_comment": "Per-format perf characteristics from prismaquant-llama "
+                    "calibrate-deep. Consumed by the allocator's --tps flag "
+                    "(currently uses pp + tg keys); other keys reserved for "
+                    "future use (quality bounds, latency caps, etc.).",
         "_reference_model": (calib.header.ref_model
                              or "(unknown)"),
         "_reference_model_sha256": calib.header.ref_model_sha256,
@@ -176,13 +191,26 @@ def export_format_perf_subset(calib: CalibrationFile, output_path: Path) -> int:
         "_binary_sha256": calib.header.binary_sha256,
         "_machine_id": calib.header.machine_id,
         "_calibrated_at": calib.header.calibrated_at,
+        "_schema_version": 2,
     }
     n_emitted = 0
     for fmt, m in calib.formats.items():
-        if m.pp512_tps is not None and m.tg128_tps is not None:
-            out[fmt] = {"pp": round(m.pp512_tps, 2),
-                        "tg": round(m.tg128_tps, 2)}
-            n_emitted += 1
+        if m.pp512_tps is None or m.tg128_tps is None:
+            continue  # baseline keys missing → skip format entirely
+        entry = {
+            "pp": round(m.pp512_tps, 2),
+            "tg": round(m.tg128_tps, 2),
+        }
+        if m.ppl is not None:
+            entry["ppl"] = round(m.ppl, 4)
+        if m.ppl_delta_vs_f16 is not None:
+            entry["ppl_delta_vs_f16"] = round(m.ppl_delta_vs_f16, 4)
+        if m.bpw is not None:
+            entry["bpw"] = round(m.bpw, 4)
+        if m.size_bytes is not None:
+            entry["size_bytes"] = int(m.size_bytes)
+        out[fmt] = entry
+        n_emitted += 1
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(out, indent=2))
     return n_emitted
@@ -209,16 +237,21 @@ def find_format_perf_file_for_binary(binary: Path,
     Returns None if no candidate file exists.
     """
     import os
-    cache_dir = (Path.home() / ".cache" / "prismaquant-llama"
-                              / "binary-types")
     sha = _binary_sha256(binary)
     sha_short = sha[:16]
-    # Try new name first, then legacy. Both full + 16-char-prefix.
-    for name in (f"{sha_short}-perf.json", f"{sha}-perf.json",
-                 f"{sha_short}-tps.json", f"{sha}-tps.json"):
-        cand = cache_dir / name
-        if cand.exists():
-            return cand
+    # Cache dirs: new (`prismaquant-llama`) + legacy (`prismaquant-wizard`).
+    # Filenames: new (`<sha>-perf.json`) + legacy (`<sha>-tps.json`).
+    # Each may use full sha or 16-char prefix. Search the cross-product.
+    cache_dirs = [
+        Path.home() / ".cache" / "prismaquant-llama" / "binary-types",
+        Path.home() / ".cache" / "prismaquant-wizard" / "binary-types",
+    ]
+    for cd in cache_dirs:
+        for name in (f"{sha_short}-perf.json", f"{sha}-perf.json",
+                     f"{sha_short}-tps.json", f"{sha}-tps.json"):
+            cand = cd / name
+            if cand.exists():
+                return cand
     # User local default (CLI flag or env var)
     if default_format_perf_override is None:
         env_override = os.environ.get("PRISMAQUANT_DEFAULT_FORMAT_PERF")
@@ -497,10 +530,19 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
         f"~{len(formats) * 10 // 60} h estimated")
     log(f"[calibrate-deep] cache: {output_path}")
 
-    # Get/establish f16 reference PPL (needed for ppl_delta_vs_f16)
+    # Get/establish f16 reference PPL (needed for ppl_delta_vs_f16). If F16
+    # (or BF16 as fallback) is in the format list, move it to the front so
+    # subsequent formats can compute Δ as they're measured. If F16 isn't in
+    # the list at all and we don't have its ppl cached, prepend it.
     f16_ppl = calib.formats.get("F16", FormatMeasurement()).ppl
-    if f16_ppl is None and "F16" not in formats:
-        formats = ["F16"] + formats   # measure F16 first
+    if f16_ppl is None:
+        if "F16" in formats:
+            formats = ["F16"] + [f for f in formats if f != "F16"]
+        elif "BF16" in formats and calib.formats.get("BF16", FormatMeasurement()).ppl is None:
+            # No F16 in list; promote BF16 if present (16-bit reference)
+            formats = ["BF16"] + [f for f in formats if f != "BF16"]
+        else:
+            formats = ["F16"] + formats   # neither cached nor in list — prepend F16
 
     with tempfile.TemporaryDirectory(prefix="prismaquant-wizard-cal-") as tmp:
         tmpdir = Path(tmp)
@@ -538,8 +580,16 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
             else:
                 m.ppl = ppl
                 m.ppl_stderr = ppl_err
-                if fmt == "F16":
+                # Set f16_ppl from F16 first; fall back to BF16 if no F16.
+                if fmt == "F16" or (fmt == "BF16" and f16_ppl is None):
                     f16_ppl = ppl
+                    # Backfill deltas for any prior formats that lacked an
+                    # f16 reference at measurement time.
+                    for prior_fmt, prior_m in calib.formats.items():
+                        if (prior_m.ppl is not None
+                                and prior_m.ppl_delta_vs_f16 is None
+                                and prior_fmt not in ("F16", "BF16")):
+                            prior_m.ppl_delta_vs_f16 = round(prior_m.ppl - f16_ppl, 4)
                 if f16_ppl is not None:
                     m.ppl_delta_vs_f16 = round(ppl - f16_ppl, 4)
 
