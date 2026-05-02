@@ -31,12 +31,46 @@ actively want to find).
 """
 
 from __future__ import annotations
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+# Source-format suffixes to strip when sanitizing HF model IDs into filenames.
+# Case-insensitive, matches at end of name. e.g.
+#   "unsloth/gpt-oss-20b-BF16"  → "gpt-oss-20b"
+#   "Qwen/Qwen3-30B-A3B-Instruct" → "Qwen3-30B-A3B-Instruct" (no change)
+_SOURCE_FORMAT_SUFFIX_RE = re.compile(
+    r"-(?:BF16|FP16|bf16|fp16|F32|F16|FP32)$",
+    re.IGNORECASE,
+)
+
+
+def sanitize_model_name(hf_model_id: str) -> str:
+    """Convert an HF model ID into a clean filename component.
+
+    Drops the org prefix (everything before the last `/`) and strips
+    common source-format suffixes (`-BF16`, `-FP16`, etc.). The result
+    is what shows up in run labels, BF16 GGUF cache filenames, and
+    final PQ GGUF filenames.
+
+    Examples:
+        unsloth/gpt-oss-20b-BF16              → gpt-oss-20b
+        google/gemma-4-E4B-it                 → gemma-4-E4B-it
+        Qwen/Qwen3-30B-A3B-Instruct           → Qwen3-30B-A3B-Instruct
+        Jackrong/Qwopus3.5-9B-v3.5            → Qwopus3.5-9B-v3.5
+    """
+    # Take the segment after the last `/` (drop org prefix).
+    short = hf_model_id.rsplit("/", 1)[-1]
+    # Strip source-format suffix if present.
+    short = _SOURCE_FORMAT_SUFFIX_RE.sub("", short)
+    # Filesystem-safe: replace any remaining unsafe chars (rare).
+    short = short.replace(" ", "_")
+    return short
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,8 +202,8 @@ class WorkPaths:
                 ggufs_override: Optional[Path] = None) -> "WorkPaths":
         root = (root or DEFAULT_OUTPUT_ROOT).expanduser().resolve()
         ts = run_timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
-        # Sanitize model name for filesystem (replace path separators + spaces)
-        safe_model = model_name.replace("/", "__").replace(" ", "_")
+        # Sanitize model name → drop org prefix + source-format suffix.
+        safe_model = sanitize_model_name(model_name)
         run_label = f"{safe_model}-{ts}"
 
         shared = root / "_shared"

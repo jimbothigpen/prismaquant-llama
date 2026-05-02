@@ -42,10 +42,10 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from .paths import find_binary, WorkPaths, DEFAULT_OUTPUT_ROOT, discover_companion_binaries
+    from .paths import find_binary, WorkPaths, DEFAULT_OUTPUT_ROOT, discover_companion_binaries, sanitize_model_name
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
-    from paths import find_binary, WorkPaths, DEFAULT_OUTPUT_ROOT, discover_companion_binaries  # type: ignore
+    from paths import find_binary, WorkPaths, DEFAULT_OUTPUT_ROOT, discover_companion_binaries, sanitize_model_name  # type: ignore
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ def _hsa_env(cfg: PipelineConfig) -> dict:
 
 def stage_a_download(cfg: PipelineConfig, paths: WorkPaths) -> Path:
     """Returns the local dir holding the HF model snapshot."""
-    safe_name = cfg.hf_model.replace("/", "__")
+    safe_name = sanitize_model_name(cfg.hf_model)
     target = paths.hf_cache / safe_name
     marker = target / ".download.complete"
     if marker.exists():
@@ -185,7 +185,7 @@ def stage_a_download(cfg: PipelineConfig, paths: WorkPaths) -> Path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def stage_b_convert(cfg: PipelineConfig, paths: WorkPaths, hf_dir: Path) -> Path:
-    safe_name = cfg.hf_model.replace("/", "__")
+    safe_name = sanitize_model_name(cfg.hf_model)
     bf16_path = paths.bf16_dir / f"{safe_name}-BF16.gguf"
     if bf16_path.exists():
         _log(paths, "B", f"B. BF16 GGUF cached at {bf16_path} (skip)")
@@ -373,7 +373,7 @@ def stage_g_allocate(cfg: PipelineConfig, paths: WorkPaths,
 def stage_h_quantize(cfg: PipelineConfig, paths: WorkPaths,
                      bf16_path: Path, recipe_path: Path,
                      imatrix_path: Path) -> Path:
-    safe_name = cfg.hf_model.replace("/", "__")
+    safe_name = sanitize_model_name(cfg.hf_model)
     out_gguf = paths.gguf_output_path(safe_name, cfg.budget_gb, cfg.priority)
     if out_gguf.exists():
         _log(paths, "H", f"H. GGUF cached at {out_gguf} (skip)")
@@ -446,7 +446,7 @@ def run_full_pipeline(cfg: PipelineConfig) -> Path:
     """Run all 9 stages. Returns path to final GGUF."""
     paths = WorkPaths.for_run(
         root=cfg.output_root,
-        model_name=cfg.hf_model.replace("/", "__"),
+        model_name=sanitize_model_name(cfg.hf_model),
     )
     paths.make()
 
