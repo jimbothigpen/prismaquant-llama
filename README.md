@@ -1,6 +1,6 @@
 # prismaquant-wizard
 
-Interactive TUI for customizing [prismaquant](https://github.com/vasilisn/prismaquant)
+Interactive TUI for customizing [prismaquant](https://github.com/RobTand/prismaquant)
 GGUF builds, designed to work with **any prismaquant-enabled fork** of
 [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp).
 
