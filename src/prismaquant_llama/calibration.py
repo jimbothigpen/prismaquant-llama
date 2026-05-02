@@ -147,60 +147,90 @@ def load_calibration_file(path: Path) -> CalibrationFile:
     return CalibrationFile.from_dict(json.loads(path.read_text()))
 
 
-def export_format_perf_subset(calib: CalibrationFile, output_path: Path) -> int:
+def export_format_perf_subset(calib: CalibrationFile, output_path: Path,
+                              absolute_only: bool = False,
+                              ratios_only: bool = False) -> int:
     """Extract format-perf subset from a CalibrationFile.
 
     Output shape (consumed by the allocator's --tps flag and any future
     consumers of per-format quality signals):
 
         {
-          "_comment": "Per-format perf characteristics from calibrate-deep run",
-          "_reference_model": "<model name + sha>",
-          "_binary_sha256": "<binary sha>",
-          "_machine_id": "<host>",
-          "_calibrated_at": "<iso timestamp>",
-          "_schema_version": 2,
+          "_schema_version": 3,
+          "_reference_format": "BF16",
           "Q4_K": {
-            "pp": 336.60,                  # PP512 tps
-            "tg": 18.74,                   # TG128 tps
-            "ppl": 6.92,                   # absolute PPL on the calibration corpus
-            "ppl_delta_vs_f16": 0.094,     # quality penalty vs F16 baseline
-            "bpw": 4.5106                  # bits per weight on this binary
+            "pp": 336.60,                    # PP512 tps (absolute, this binary+GPU)
+            "tg": 18.74,                     # TG128 tps (absolute)
+            "pp_ratio_vs_bf16": 0.91,        # hardware-portable: pp / pp(BF16)
+            "tg_ratio_vs_bf16": 2.62,        # hardware-portable: tg / tg(BF16)
+            "ppl": 6.92,
+            "ppl_delta_vs_f16": 0.094,
+            "bpw": 4.5106
           },
           ...
         }
 
-    Schema notes:
+    Schema versions:
       - v1: pp + tg only
-      - v2: adds ppl, ppl_delta_vs_f16, bpw (this version)
-      - Reserved future keys: lat_p99_ms, mem_gb_per_param, compatible
+      - v2: adds ppl, ppl_delta_vs_f16, bpw, size_bytes
+      - v3 (this): adds pp_ratio_vs_bf16, tg_ratio_vs_bf16 alongside abs.
 
-    Only formats with at minimum pp512_tps AND tg128_tps measured are
-    emitted. Other fields are omitted per-format if not measured.
-    Returns the number of formats written.
+    Allocator reader prefers absolute values when present, falls back to
+    ratios. Population-mean normalization in the cost function makes the
+    two functionally equivalent (only relative magnitudes matter).
+
+    Modes:
+      - default: emit BOTH absolute + ratio (per-binary cache)
+      - absolute_only=True: only abs (smaller schema, legacy)
+      - ratios_only=True: emit ratio columns; abs set to None
+        (used for hardware-agnostic shipped defaults — abs values from
+        one machine are misleading on another)
     """
     out = {
         "_comment": "Per-format perf characteristics from prismaquant-llama "
-                    "calibrate-deep. Consumed by the allocator's --tps flag "
-                    "(currently uses pp + tg keys); other keys reserved for "
-                    "future use (quality bounds, latency caps, etc.).",
-        "_reference_model": (calib.header.ref_model
-                             or "(unknown)"),
+                    "calibrate-deep. Schema v3: absolute pp/tg are this-binary-"
+                    "specific; pp_ratio_vs_bf16 / tg_ratio_vs_bf16 transfer "
+                    "across hardware (within ~20%). Allocator uses abs if "
+                    "available, ratios otherwise.",
+        "_reference_model": (calib.header.ref_model or "(unknown)"),
         "_reference_model_sha256": calib.header.ref_model_sha256,
         "_reference_model_params": calib.header.ref_model_params,
         "_binary_sha256": calib.header.binary_sha256,
         "_machine_id": calib.header.machine_id,
         "_calibrated_at": calib.header.calibrated_at,
-        "_schema_version": 2,
+        "_schema_version": 3,
+        "_reference_format": "BF16",
     }
+
+    # Find BF16 (preferred) or F16 baseline for ratio computation
+    bf16_pp = bf16_tg = None
+    for ref_name in ("BF16", "F16"):
+        m = calib.formats.get(ref_name)
+        if m and m.pp512_tps is not None and m.tg128_tps is not None:
+            bf16_pp, bf16_tg = m.pp512_tps, m.tg128_tps
+            out["_reference_format"] = ref_name
+            break
+
     n_emitted = 0
     for fmt, m in calib.formats.items():
         if m.pp512_tps is None or m.tg128_tps is None:
-            continue  # baseline keys missing → skip format entirely
-        entry = {
-            "pp": round(m.pp512_tps, 2),
-            "tg": round(m.tg128_tps, 2),
-        }
+            continue
+        entry = {}
+        # Absolute values (per-binary; null in ratios-only mode)
+        if ratios_only:
+            entry["pp"] = None
+            entry["tg"] = None
+        elif not absolute_only:
+            entry["pp"] = round(m.pp512_tps, 2)
+            entry["tg"] = round(m.tg128_tps, 2)
+        else:
+            entry["pp"] = round(m.pp512_tps, 2)
+            entry["tg"] = round(m.tg128_tps, 2)
+        # Ratios (hardware-portable; absent in absolute_only mode)
+        if not absolute_only and bf16_pp and bf16_tg:
+            entry["pp_ratio_vs_bf16"] = round(m.pp512_tps / bf16_pp, 4)
+            entry["tg_ratio_vs_bf16"] = round(m.tg128_tps / bf16_tg, 4)
+        # Quality + size (model-specific but useful)
         if m.ppl is not None:
             entry["ppl"] = round(m.ppl, 4)
         if m.ppl_delta_vs_f16 is not None:
@@ -250,8 +280,11 @@ def find_format_perf_file_for_binary(binary: Path,
         3. `~/.config/prismaquant-llama/system-default-format-perf.json` — the
            user's "system default", written by `calibrate deep --set-as-system-default`.
            Persists across binary rebuilds; serves as cross-binary fallback.
-        4. `<pkg>/examples/format-perf-<arch>.json` (or legacy `format-tps-`) —
-           package-shipped static reference, hostname-matched.
+        4. `<pkg>/examples/format-perf-default.json` — package-shipped
+           hardware-agnostic baseline. Format-relative throughput ratios
+           transfer roughly across GPUs (within ~20%) so this gives sensible
+           defaults for any user. Run `calibrate deep --set-as-system-default`
+           to get measured values for your specific hardware.
 
     Returns None if no candidate file exists.
     """
@@ -281,16 +314,24 @@ def find_format_perf_file_for_binary(binary: Path,
     # System default (user wrote via `calibrate deep --set-as-system-default`)
     if SYSTEM_DEFAULT_PERF_PATH.exists():
         return SYSTEM_DEFAULT_PERF_PATH
-    # Package-shipped examples by hostname → arch (new + legacy names)
+    # Package-shipped baseline. The default file is intentionally hardware-
+    # agnostic — format-relative throughput ratios transfer roughly across
+    # GPUs (within ~20%) so a single calibrated reference serves as a sane
+    # starting point for any user. For accurate values on your specific
+    # hardware, run `prismaquant-llama calibrate deep --set-as-system-default`.
+    # Fallback chain (new naming preferred; legacy arch-suffixed names kept
+    # for backward compat with files emitted by earlier versions):
     if examples_dir is not None:
-        host = os.environ.get("HOSTNAME") or os.uname().nodename
-        host_to_arch = {"ai00": "gfx1150", "ai01": "gfx1102"}
-        arch = host_to_arch.get(host)
-        if arch:
-            for fname in (f"format-perf-{arch}.json", f"format-tps-{arch}.json"):
-                cand = examples_dir / fname
-                if cand.exists():
-                    return cand
+        for fname in ("format-perf-default.json",
+                      "format-perf.json",
+                      # legacy arch-suffixed (deprecated; matches by hostname)
+                      *(f"format-perf-{a}.json"
+                        for a in ("gfx1150", "gfx1102")),
+                      *(f"format-tps-{a}.json"
+                        for a in ("gfx1150", "gfx1102"))):
+            cand = examples_dir / fname
+            if cand.exists():
+                return cand
     return None
 
 

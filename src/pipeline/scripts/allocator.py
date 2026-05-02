@@ -269,6 +269,26 @@ def parse_priority(spec: str) -> tuple[float, float, float]:
     return (p/s, t/s, q/s)
 
 
+def _tps_lookup(tps: dict, fmt: str, axis: str) -> float:
+    """Resolve a per-format throughput value with absolute/ratio fallback.
+
+    Schema-v3 allows `pp` / `tg` to be null (when only ratios are populated,
+    e.g. shipped hardware-agnostic defaults). When absolute is null/missing,
+    fall back to the corresponding ratio key (`pp_ratio_vs_bf16` /
+    `tg_ratio_vs_bf16`). The cost function's population-mean normalization
+    makes absolute and ratio functionally equivalent — only relative
+    magnitudes between formats matter.
+    """
+    tps_f = tps.get(fmt, {})
+    abs_v = tps_f.get(axis)
+    if abs_v is not None:
+        return float(abs_v)
+    ratio_v = tps_f.get(f"{axis}_ratio_vs_bf16")
+    if ratio_v is not None:
+        return float(ratio_v)
+    return 1.0
+
+
 def compute_norms(costs: dict, fisher: dict, tps: dict) -> tuple[float, float, float]:
     """Population means of each cost component over all (t, f) pairs. Used to
     bring the three terms into comparable units before applying weights."""
@@ -280,9 +300,8 @@ def compute_norms(costs: dict, fisher: dict, tps: dict) -> tuple[float, float, f
         h = fisher.get(t, 0.0)
         for f, (mse, sz, _, _) in fmts.items():
             sum_ppl += 0.5 * h * mse
-            tps_f = tps.get(f, {})
-            tg = tps_f.get("tg", 1.0)
-            pp = tps_f.get("pp", 1.0)
+            tg = _tps_lookup(tps, f, "tg")
+            pp = _tps_lookup(tps, f, "pp")
             sum_tg += sz / tg
             sum_pp += sz / pp
             n += 1
@@ -330,9 +349,8 @@ def solve_for_lambda(fisher: dict[str, float],
         best_f, best_score = None, math.inf
         for f, (mse, sz, _, _) in fmts.items():
             ppl_term = 0.5 * h * mse / n_ppl
-            tps_f = tps.get(f, {})
-            tg_tps = tps_f.get("tg", 1.0)
-            pp_tps = tps_f.get("pp", 1.0)
+            tg_tps = _tps_lookup(tps, f, "tg")
+            pp_tps = _tps_lookup(tps, f, "pp")
             tg_term = (sz / tg_tps) / n_tg
             pp_term = (sz / pp_tps) / n_pp
             multi_obj = w_ppl * ppl_term + w_tg * tg_term + w_pp * pp_term
