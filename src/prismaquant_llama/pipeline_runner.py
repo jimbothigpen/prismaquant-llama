@@ -174,6 +174,39 @@ def _hsa_env(cfg: PipelineConfig) -> dict:
     return {"HSA_OVERRIDE_GFX_VERSION": cfg.hsa_override} if cfg.hsa_override else {}
 
 
+def _auto_pick_stage_e_exemplars(bf16_path: Path) -> list[int]:
+    """Read the BF16 GGUF tensor shapes, classify layers by attention shape
+    signature (sliding vs full for iSWA, etc.), and pick one exemplar layer
+    per type for Stage E to measure. The allocator's propagation logic uses
+    matching layer-type tagging to extrapolate from these exemplars.
+
+    For non-iSWA arches (single layer type), returns [0, 3] — the historical
+    default that covers low + mid-stack as a sanity check.
+
+    For iSWA arches (gemma-3, gemma-4): returns first layer of EACH type, so
+    e.g. [0, 5] for gemma-4-E4B (sliding=0, first full=5).
+    """
+    try:
+        # Reuse the allocator script's GGUF parser + classifier.
+        sys.path.insert(0, str(Path(__file__).parents[1] / "pipeline" / "scripts"))
+        from allocator import (read_gguf_tensor_meta, detect_layer_types,
+                                auto_pick_exemplar_layers)
+        meta = read_gguf_tensor_meta(str(bf16_path))
+        layer_type = detect_layer_types(meta)
+        if not layer_type:
+            return [0, 3]  # fallback: legacy default
+        types = set(layer_type.values())
+        if len(types) <= 1:
+            # Single arch type: keep the safe pair (low + mid stack)
+            return [0, 3]
+        # iSWA / multi-type: one exemplar per type
+        return auto_pick_exemplar_layers(layer_type)
+    except Exception as e:
+        # Defensive: any GGUF parse failure → legacy default
+        print(f"  WARN: exemplar auto-detect failed ({e}); using [0, 3] default")
+        return [0, 3]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage A — download HF safetensors
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,13 +343,21 @@ def stage_e_costs(cfg: PipelineConfig, paths: WorkPaths,
         raise SystemExit(
             f"ERROR: llama-quantize-cost not found at {cost_bin}.\n"
             f"  Build llama.cpp with -DGGML_BUILD_TOOLS=ON.")
+    # Auto-detect exemplar layers from BF16 GGUF tensor shapes so iSWA arches
+    # (gemma-3, gemma-4 with full_attention vs sliding_attention head_dim diff)
+    # get one exemplar per layer-type signature. Falls back to safe defaults
+    # for non-iSWA arches.
+    exemplar_layers = _auto_pick_stage_e_exemplars(bf16_path)
+    layer_alt = "|".join(str(L) for L in exemplar_layers)
+    include_regex = rf"^(token_embd|output|blk\.({layer_alt}))\."
     _log(paths, "E", f"E. measuring per-(tensor, format) MSE → {costs_path}")
+    _log(paths, "E", f"E. exemplar layers: {exemplar_layers} (include-regex: {include_regex})")
     rc = _run(
         [str(cost_bin),
          "--model", str(bf16_path),
          "--types", ",".join(cfg.formats),
          "--imatrix", str(imatrix_path),
-         "--include-regex", r"^(token_embd|output|blk\.(0|3))\.",
+         "--include-regex", include_regex,
          "--output", str(costs_path)],
         paths.logs_dir / "stage-E.log",
     )

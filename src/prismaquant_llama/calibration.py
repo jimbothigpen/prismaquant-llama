@@ -216,6 +216,24 @@ def export_format_perf_subset(calib: CalibrationFile, output_path: Path) -> int:
     return n_emitted
 
 
+SYSTEM_DEFAULT_PERF_PATH = (
+    Path.home() / ".config" / "prismaquant-llama" / "system-default-format-perf.json"
+)
+
+
+def set_system_default_perf(source_path: Path) -> Path:
+    """Copy a format-perf file into the system-default slot at
+    ~/.config/prismaquant-llama/system-default-format-perf.json. Future
+    pipeline runs auto-discover this as a tier-3 fallback (after the
+    per-binary cache, before the package-shipped examples).
+
+    Returns the destination path."""
+    import shutil
+    SYSTEM_DEFAULT_PERF_PATH.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, SYSTEM_DEFAULT_PERF_PATH)
+    return SYSTEM_DEFAULT_PERF_PATH
+
+
 def find_format_perf_file_for_binary(binary: Path,
                               examples_dir: Optional[Path] = None,
                               default_format_perf_override: Optional[Path] = None,
@@ -223,15 +241,16 @@ def find_format_perf_file_for_binary(binary: Path,
     """Resolve the best-available format-perf file for this binary.
 
     Priority (highest → lowest):
-        1. `~/.cache/prismaquant-llama/binary-types/<sha-prefix>-perf.json`
-           (or legacy `-tps.json`) — auto-generated from a `calibrate deep`
-           run on this exact binary. Most specific; always wins when present.
-        2. `default_format_perf_override` — user-supplied "my preferred default"
-           via `--default-format-perf` flag or PRISMAQUANT_DEFAULT_FORMAT_PERF
-           env var. Use this for cross-binary defaults (e.g., the user
-           calibrated one binary build and wants those numbers used as the
-           default for newer builds until they re-calibrate).
-        3. `<pkg>/examples/format-perf-<arch>.json` (or legacy `format-tps-`) —
+        1. `~/.cache/.../binary-types/<sha-prefix>-perf.json` (or legacy
+           `-tps.json`) — auto-generated from `calibrate deep` on this binary.
+           Most specific; always wins when present.
+        2. `default_format_perf_override` — user-supplied via
+           `--default-format-perf` flag or PRISMAQUANT_DEFAULT_FORMAT_PERF env
+           var. Per-run preference.
+        3. `~/.config/prismaquant-llama/system-default-format-perf.json` — the
+           user's "system default", written by `calibrate deep --set-as-system-default`.
+           Persists across binary rebuilds; serves as cross-binary fallback.
+        4. `<pkg>/examples/format-perf-<arch>.json` (or legacy `format-tps-`) —
            package-shipped static reference, hostname-matched.
 
     Returns None if no candidate file exists.
@@ -259,6 +278,9 @@ def find_format_perf_file_for_binary(binary: Path,
             default_format_perf_override = Path(env_override)
     if default_format_perf_override is not None and default_format_perf_override.exists():
         return default_format_perf_override
+    # System default (user wrote via `calibrate deep --set-as-system-default`)
+    if SYSTEM_DEFAULT_PERF_PATH.exists():
+        return SYSTEM_DEFAULT_PERF_PATH
     # Package-shipped examples by hostname → arch (new + legacy names)
     if examples_dir is not None:
         host = os.environ.get("HOSTNAME") or os.uname().nodename
@@ -681,6 +703,7 @@ def ingest_prismaquant_cost_csv(cost_csv: Path,
 
 def main(argv: Optional[list[str]] = None) -> int:
     import argparse
+    import sys
     p = argparse.ArgumentParser(description="Calibrate weight quants on this binary + hardware")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -706,6 +729,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     pd.add_argument("--machine-id", default="")
     pd.add_argument("--perp-binary", type=Path)
     pd.add_argument("--bench-binary", type=Path)
+    pd.add_argument("--set-as-system-default", action="store_true",
+                    help="After calibration completes, copy the resulting "
+                         "format-perf JSON to ~/.config/prismaquant-llama/"
+                         "system-default-format-perf.json. Future pipeline "
+                         "runs auto-discover this as a cross-binary default "
+                         "(tier 3 in find_format_perf_file_for_binary). "
+                         "Use once with your preferred reference model "
+                         "(e.g., a 9B dense like Qwopus3.5-9B-v3.5).")
+
+    # set-default (manual)
+    psd = sub.add_parser("set-default-perf",
+                         help="Set an existing format-perf JSON as the system default")
+    psd.add_argument("--source", type=Path, required=True,
+                     help="path to existing format-perf JSON to install")
 
     # ingest
     pi = sub.add_parser("ingest", help="absorb prismaquant Stage D cost.csv")
@@ -725,13 +762,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             calibrate_quick(args.binary, args.ref_model, fmts,
                             output_path=args.output, machine_id=args.machine_id)
         else:
-            calibrate_deep(args.binary, args.ref_model, args.calibration_corpus,
+            calib = calibrate_deep(args.binary, args.ref_model, args.calibration_corpus,
                            fmts, perp_binary=args.perp_binary,
                            bench_binary=args.bench_binary,
                            output_path=args.output, chunks=args.chunks, ctx=args.ctx,
                            machine_id=args.machine_id)
+            if getattr(args, "set_as_system_default", False):
+                # Locate the perf file calibrate_deep just emitted
+                cache_path = args.output or calibration_cache_path(args.binary)
+                perf_path = cache_path.parent / f"{cache_path.stem.replace('-calibrated','')}-perf.json"
+                if perf_path.exists():
+                    dst = set_system_default_perf(perf_path)
+                    print(f"[calibrate-deep] system default → {dst}")
+                else:
+                    print(f"[calibrate-deep] WARN: --set-as-system-default specified but "
+                          f"no perf file at {perf_path}", file=sys.stderr)
     elif args.cmd == "ingest":
         ingest_prismaquant_cost_csv(args.cost_csv, binary_for_cache_key=args.binary)
+    elif args.cmd == "set-default-perf":
+        if not args.source.exists():
+            print(f"ERROR: source perf file not found: {args.source}", file=sys.stderr)
+            return 1
+        dst = set_system_default_perf(args.source)
+        print(f"system default → {dst}")
     return 0
 
 

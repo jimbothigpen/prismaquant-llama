@@ -160,27 +160,35 @@ def detect_layer_types(tensor_names_or_meta) -> dict[int, str]:
             continue
         suffix = parts[2]
         shape = tensor_names_or_meta[tn] if has_shapes else None
-        if suffix.startswith("attn_qkv"):
+        # Match ONLY .weight tensors — skip biases, norms (1D) which would
+        # corrupt the shape signature with their wrong dimensionality.
+        if suffix == "attn_qkv.weight":
             sigs_by_layer.setdefault(L, {})["attn_qkv"] = shape
-        elif suffix == "attn_q.weight" or suffix.startswith("attn_q."):
-            sigs_by_layer.setdefault(L, {}).setdefault("attn_q", shape)
-        elif suffix == "attn_k.weight" or suffix.startswith("attn_k."):
-            sigs_by_layer.setdefault(L, {}).setdefault("attn_k", shape)
+        elif suffix == "attn_q.weight":
+            sigs_by_layer.setdefault(L, {})["attn_q"] = shape
+        elif suffix == "attn_k.weight":
+            sigs_by_layer.setdefault(L, {})["attn_k"] = shape
+
+    def _shape_tag(shape):
+        """Return shape[1] (output dim) if available, else None.
+        Defensive: handles None, 1D shapes, etc."""
+        if shape is None or len(shape) < 2:
+            return None
+        return shape[1]
 
     out = {}
     for L, sigs in sigs_by_layer.items():
         if "attn_qkv" in sigs:
             # Linear-attention (Gated-Delta-Net / Mamba-2 / etc.); shape-tag if available
-            shp = sigs["attn_qkv"]
-            out[L] = f"linear_{shp[1]}" if shp else "linear"
+            tag = _shape_tag(sigs["attn_qkv"])
+            out[L] = f"linear_{tag}" if tag is not None else "linear"
         elif "attn_q" in sigs:
-            q_shp = sigs["attn_q"]
-            k_shp = sigs.get("attn_k")
-            if q_shp and k_shp:
-                # Shape-aware tag distinguishes iSWA layer subtypes.
-                out[L] = f"softmax_q{q_shp[1]}_k{k_shp[1]}"
-            elif q_shp:
-                out[L] = f"softmax_q{q_shp[1]}"
+            q_tag = _shape_tag(sigs["attn_q"])
+            k_tag = _shape_tag(sigs.get("attn_k"))
+            if q_tag is not None and k_tag is not None:
+                out[L] = f"softmax_q{q_tag}_k{k_tag}"
+            elif q_tag is not None:
+                out[L] = f"softmax_q{q_tag}"
             else:
                 out[L] = "softmax"
     return out
