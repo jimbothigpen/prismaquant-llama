@@ -1,5 +1,5 @@
 {
-  "_comment": "Base format metadata for prismaquant-wizard. Covers mainline llama.cpp + ikllama (the prismaquant ancestor). Fork-specific formats (TheTom turbo family, frankenturbo TQ family, etc.) live in the fork's own format_metadata_<forkname>.json file (convention path: <binary>/../../tools/prismaquant/format_metadata_*.json). User personal overrides go in ~/.config/prismaquant-wizard/format_metadata_*.json. The wizard merges all sources at runtime, with later-loaded files overriding earlier.",
+  "_comment": "Base format metadata shipped with prismaquant-llama. Covers ONLY mainline llama.cpp (ggml-org/llama.cpp) quants — not any specific fork. Forks that add custom quants (ik_llama IK-K family, frankenturbo TQ family, etc.) ship their own format_metadata_<forkname>.json file via the convention path: <binary>/../../tools/prismaquant/format_metadata_*.json. Users without a fork-shipped extension can either (a) generate one for their binary via `prismaquant-llama discover --generate-metadata <out>.json`, (b) drop a personal override at ~/.config/prismaquant-llama/format_metadata_*.json, or (c) use the wizard's --all-formats mode to surface heuristic-classified formats from the binary's --help output.",
 
   "Q4_0":     {"bpw": 4.5,    "family": "k",  "source": "mainline", "recommend": false, "note": "legacy 4-bit, mostly superseded by Q4_K"},
   "Q4_1":     {"bpw": 5.0,    "family": "k",  "source": "mainline", "recommend": false},
@@ -13,7 +13,7 @@
   "Q5_K_M":   {"bpw": 5.33,   "family": "k",  "source": "mainline", "recommend": true},
   "Q6_K":     {"bpw": 6.5625, "family": "k",  "source": "mainline", "recommend": true},
   "Q8_0":     {"bpw": 8.5,    "family": "k",  "source": "mainline", "recommend": true},
-  "Q2_K":     {"bpw": 2.625,  "family": "k",  "source": "mainline", "recommend": false, "note": "extreme low-bit; usually picked over IQ2_K only when imatrix unavailable"},
+  "Q2_K":     {"bpw": 2.625,  "family": "k",  "source": "mainline", "recommend": false, "note": "extreme low-bit; rarely useful without an imatrix-aware allocator"},
   "Q2_K_S":   {"bpw": 2.625,  "family": "k",  "source": "mainline", "recommend": false},
   "Q3_K":     {"bpw": 3.4375, "family": "k",  "source": "mainline", "recommend": false, "note": "alias for Q3_K_M"},
   "Q3_K_S":   {"bpw": 3.41,   "family": "k",  "source": "mainline", "recommend": false},
@@ -32,14 +32,6 @@
   "IQ2_XXS":  {"bpw": 2.0625, "family": "i",  "source": "mainline", "recommend": false},
   "IQ1_M":    {"bpw": 1.75,   "family": "i",  "source": "mainline", "recommend": false, "note": "very lossy"},
   "IQ1_S":    {"bpw": 1.5625, "family": "i",  "source": "mainline", "recommend": false, "note": "very lossy"},
-
-  "IQ4_K":    {"bpw": 4.5,    "family": "ik", "source": "ikllama", "recommend": true,  "note": "imatrix-aware 4-bit"},
-  "IQ4_KS":   {"bpw": 4.25,   "family": "ik", "source": "ikllama", "recommend": true},
-  "IQ4_KSS":  {"bpw": 4.0,    "family": "ik", "source": "ikllama", "recommend": true},
-  "IQ4_KT":   {"bpw": 4.0,    "family": "ik", "source": "ikllama", "recommend": false, "note": "trellis, SLOW (per --help)"},
-  "IQ3_K":    {"bpw": 3.4375, "family": "ik", "source": "ikllama", "recommend": true},
-  "IQ3_KS":   {"bpw": 3.1875, "family": "ik", "source": "ikllama", "recommend": true},
-  "IQ2_K":    {"bpw": 2.375,  "family": "ik", "source": "ikllama", "recommend": true,  "note": "extreme compression sweet spot"},
 
   "TQ1_0":    {"bpw": 1.69,   "family": "tq", "source": "mainline", "recommend": false, "note": "ternarization"},
   "TQ2_0":    {"bpw": 2.06,   "family": "tq", "source": "mainline", "recommend": false, "note": "ternarization"},

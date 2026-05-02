@@ -66,10 +66,20 @@ _RE_TYPE_LINE = re.compile(
     re.VERBOSE,
 )
 
-# Hard denylist — types that show up in --help but aren't allocator candidates.
+# Hard denylist — uppercase tokens that match the parser regex but aren't
+# actual quantization types. Includes section headers, warning labels, and
+# meta-modes that some llama.cpp builds emit in their --help output.
 DENYLIST = frozenset({
-    "F32",       # internal full-precision; not a quantization
-    "COPY",      # not a quant; copy mode
+    "F32",         # internal full-precision; not a quantization
+    "COPY",        # not a quant; copy mode
+    "WARNING",     # warning-block prefix
+    "NOTE",        # note-block prefix
+    "IMPORTANT",   # general help-text label
+    "ERROR",       # error-block prefix
+    "USAGE",       # usage-line prefix in some builds
+    "FORMATS",     # plural — some help builds use it as a section header
+    "TYPES",
+    "EXAMPLE",
 })
 
 
@@ -102,6 +112,78 @@ def _binary_hash(binary_path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()[:16]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Heuristic classification — used when no curated metadata covers a format
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RE_BPW   = re.compile(r"(\d+(?:\.\d+)?)\s*bpw", re.IGNORECASE)
+_RE_GBYTE = re.compile(r"(\d+(?:\.\d+)?)\s*G\b")  # "4.34G" — size-at-Llama3-8B; bpw ≈ size
+
+# Family pattern matching by NAME alone (no fork-attribution by name)
+_RE_FAMILY = [
+    (re.compile(r"^IQ\d+_K(S{1,2}|T)?$"),    "ik"),  # IQ4_K, IQ4_KS, IQ4_KSS, IQ4_KT, IQ3_K, IQ3_KS, IQ2_K
+    (re.compile(r"^IQ\d+(_[A-Z]+)?$"),        "i"),  # IQ4_NL, IQ4_XS, IQ3_S, IQ3_M, IQ2_S, IQ1_M, etc.
+    (re.compile(r"^Q\d+_K(_[SML])?$"),        "k"),  # Q2_K, Q4_K_S, Q5_K_M, Q6_K
+    (re.compile(r"^Q\d+_[01]$"),              "k"),  # Q4_0, Q4_1, Q5_0, Q5_1, Q8_0
+    (re.compile(r"^Q\d+_K_[SML]$"),           "k"),
+    (re.compile(r"^Q1_0(_G\d+)?$"),           "k"),  # Q1_0, Q1_0_G128 (carlosfundora ternary)
+    (re.compile(r"^TQ\d+_[01][A-Z]*$"),       "tq"), # TQ3_0, TQ3_1S, TQ3_4S, TQ4_1S, TQ3_1S_AP1
+    (re.compile(r"^Q\d+_[01]_TQ$"),           "tq"), # Q4_0_TQ, Q4_1_TQ
+    (re.compile(r"^MXFP\d+(_MOE)?$"),         "fp"),
+    (re.compile(r"^NVFP\d+$"),                "fp"),
+    (re.compile(r"^F(16|32)$|^BF16$"),        "fp"),
+]
+
+# Source attribution from --help description (fork-specific markers)
+_RE_SOURCE_PATTERNS = [
+    (re.compile(r"\(ik_llama\)", re.IGNORECASE),                                "ikllama"),
+    (re.compile(r"WHT|Lloyd-Max|ternarization|ternary|four E3M5|four scales\+shifts|promoted superblock"),
+                                                                                "frankenturbo"),
+]
+
+_RECOMMEND_DEFAULT_NAMES = frozenset({
+    "Q4_K", "Q4_K_S", "Q4_K_M", "Q5_K", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0",
+    "IQ4_XS",
+    "IQ4_K", "IQ4_KS", "IQ4_KSS", "IQ3_K", "IQ3_KS", "IQ2_K",
+})
+
+
+def _heuristic_classify(name: str, desc: str) -> dict:
+    """Best-effort classification from name + --help description.
+    Used when the format isn't covered by base/extension metadata."""
+    bpw: Optional[float] = None
+    m = _RE_BPW.search(desc)
+    if m:
+        bpw = float(m.group(1))
+    else:
+        # Fallback: derive bpw from "X.XXG" reference-size mention. The
+        # llama.cpp --help quotes sizes at Llama-3-8B (~8B params); for
+        # 8B params, size_GB ≈ bpw within ~10%.
+        gm = _RE_GBYTE.search(desc)
+        if gm:
+            bpw = float(gm.group(1)) * 1.07  # rough fudge factor
+
+    family = "?"
+    for rx, fam in _RE_FAMILY:
+        if rx.match(name):
+            family = fam
+            break
+
+    source = "mainline"  # default — overridden by description markers
+    for rx, src in _RE_SOURCE_PATTERNS:
+        if rx.search(desc):
+            source = src
+            break
+
+    return {
+        "bpw": round(bpw, 4) if bpw is not None else None,
+        "family": family,
+        "source": source,
+        "recommend": name in _RECOMMEND_DEFAULT_NAMES,
+        "note": "(heuristic-classified)" if family != "?" else "(unrecognized; verify before use)",
+    }
 
 
 def _parse_help_output(help_text: str) -> list[tuple[Optional[int], str, str]]:
@@ -229,16 +311,24 @@ def discover_formats(
         meta = metadata.get(name, {})
         if meta.get("exclude_from_wizard"):
             continue
+        # Heuristic-classify FIRST (always derives something from name + --help
+        # description), then let curated metadata override field-by-field. This
+        # gives unknown formats sensible defaults instead of "?" everywhere.
+        # Note: we only use the heuristic's `note` if the format is NOT in
+        # curated metadata at all — otherwise empty string (curated format
+        # without an explicit note field is correctly noteless, not heuristic).
+        heuristic = _heuristic_classify(name, desc)
+        in_meta = name in metadata
         formats[name] = FormatInfo(
             name=name,
             id=type_id,
             binary_desc=desc,
-            bpw=meta.get("bpw"),
-            family=meta.get("family", "?"),
-            source=meta.get("source", "?"),
-            recommend=meta.get("recommend", False),
-            note=meta.get("note", ""),
-            in_metadata=name in metadata,
+            bpw=meta.get("bpw", heuristic["bpw"]),
+            family=meta.get("family", heuristic["family"]),
+            source=meta.get("source", heuristic["source"]),
+            recommend=meta.get("recommend", heuristic["recommend"]),
+            note=meta.get("note", "" if in_meta else heuristic["note"]),
+            in_metadata=in_meta,
         )
 
     # Fallback if parsing yielded nothing
@@ -272,13 +362,78 @@ def _filter(formats: dict[str, FormatInfo], all_formats: bool) -> dict[str, Form
 # CLI for ad-hoc inspection
 # ─────────────────────────────────────────────────────────────────────────────
 
+def generate_metadata_skeleton(binary_path: Path,
+                               output_path: Path,
+                               include_already_curated: bool = False) -> int:
+    """
+    Auto-generate a format_metadata_<forkname>.json skeleton from a
+    binary's --help output. Heuristic-classified for bpw / family / source;
+    user can edit before saving as a discovery extension.
+
+    By default, formats already covered by the loaded base/extension
+    metadata are EXCLUDED (so the user only edits formats the wizard
+    doesn't already know about). Pass include_already_curated=True to
+    dump everything.
+    """
+    fmts = discover_formats(binary_path, all_formats=True, use_cache=False)
+    out: dict = {
+        "_comment": (
+            f"Auto-generated by `prismaquant-llama discover --generate-metadata` "
+            f"from {binary_path.name} on {Path.cwd()}. "
+            f"Edit the `recommend` flags + add `note` fields for the "
+            f"formats you want to surface in the wizard's recommend list. "
+            f"Drop this file at <binary>/../../tools/prismaquant/"
+            f"format_metadata_<forkname>.json (fork-shipped) or "
+            f"~/.config/prismaquant-llama/format_metadata_<name>.json "
+            f"(user override) for auto-discovery on next run."
+        )
+    }
+    n_emitted = 0
+    for name, info in fmts.items():
+        if not include_already_curated and info.in_metadata:
+            continue
+        entry = {
+            "bpw": round(info.bpw, 4) if info.bpw is not None else None,
+            "family": info.family,
+            "source": info.source,
+            "recommend": False,    # default to false; user sets true for ones they want
+        }
+        if info.note:
+            entry["note"] = info.note
+        elif not info.in_metadata:
+            entry["note"] = "(auto-generated; review before enabling recommend=true)"
+        out[name] = entry
+        n_emitted += 1
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(out, indent=2))
+    return n_emitted
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     import argparse
     p = argparse.ArgumentParser(description="Inspect supported quant formats from a llama-quantize binary.")
     p.add_argument("binary", type=Path, help="path to llama-quantize")
     p.add_argument("--all", action="store_true", help="show all supported (not just recommended)")
     p.add_argument("--no-cache", action="store_true", help="skip cache, always parse --help")
+    p.add_argument("--generate-metadata", type=Path, metavar="FILE",
+                   help="emit a fork-extension metadata skeleton JSON to FILE — "
+                        "covers only formats not already in base/extension metadata "
+                        "(use --generate-all to dump everything)")
+    p.add_argument("--generate-all", action="store_true",
+                   help="with --generate-metadata, include formats already in "
+                        "base/extension metadata (overrides instead of extending)")
     args = p.parse_args(argv)
+
+    if args.generate_metadata:
+        n = generate_metadata_skeleton(args.binary, args.generate_metadata,
+                                       include_already_curated=args.generate_all)
+        print(f"  ✓ wrote {n} format entries to {args.generate_metadata}")
+        print(f"  → review + edit recommend flags, then drop the file at:")
+        print(f"      <binary>/../../tools/prismaquant/format_metadata_<forkname>.json")
+        print(f"    (fork-shipped extension, auto-discovered) OR")
+        print(f"      ~/.config/prismaquant-llama/format_metadata_<name>.json")
+        print(f"    (personal override, applies to all binaries)")
+        return 0
 
     fmts = discover_formats(args.binary, all_formats=args.all, use_cache=not args.no_cache)
     print(f"  binary: {args.binary}")
