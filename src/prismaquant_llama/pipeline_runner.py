@@ -65,16 +65,16 @@ class PipelineConfig:
     budget_auto_ratio: float = 0.25     # used when budget_gb is None — 25% of BF16
                                         # ≈ slightly tighter than IQ4_XS (27-29% real-world)
     formats: list[str] = field(default_factory=lambda: [
-        "Q4_K", "Q5_K", "Q6_K", "Q8_0",
-        "IQ4_XS", "IQ4_K", "IQ4_KS", "IQ4_KSS",
-        "IQ3_K", "IQ3_KS",
-        # IQ2_K intentionally excluded by default. It's a reliable PPL cliff
-        # (+30 PPL vs F16 across every model we've measured) that's only ~18%
-        # smaller than IQ3_KS. Allocators choosing it under noisy probe data
-        # produce catastrophic outputs (e.g. gemma-3-4b v6 picked IQ2_K for
-        # 84% of tensors → PPL 14.84 vs uniform IQ3_KS's ~12.9 at similar size).
-        # Re-enable explicitly via --formats Q4_K,...,IQ2_K when extreme
-        # compression is genuinely needed.
+        # Mainline llama.cpp formats only — keeps prismaquant-llama compatible
+        # with stock ggml-org/llama.cpp builds out of the box.
+        # To use ik_llama / frankenturbo / similar fork extensions (IQ4_K,
+        # IQ4_KS, IQ4_KSS, IQ3_K, IQ3_KS, etc.), pass `--formats` explicitly
+        # with the extension types appended. `prismaquant-llama discover
+        # <binary>` lists everything your binary supports, tagged by source.
+        # Note: IQ2_K (and similar 2-bit IK-K extensions) is a reliable PPL
+        # cliff (+30 PPL vs F16 across every model measured) and should not
+        # be added to this list even when opting into fork formats.
+        "Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ4_XS",
     ])
     pinned: dict[str, str] = field(default_factory=lambda: {
         "output.weight": "Q6_K",

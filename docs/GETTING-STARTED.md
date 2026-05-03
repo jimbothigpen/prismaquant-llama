@@ -169,21 +169,30 @@ prismaquant-llama pipeline run \
 
 ### Format whitelist
 
-Restrict the allocator to a specific set of formats:
+The allocator default is **mainline llama.cpp formats only**:
+
+```
+Q4_K, Q5_K, Q6_K, Q8_0, IQ4_XS
+```
+
+This keeps prismaquant-llama compatible with stock `ggml-org/llama.cpp` builds out of the box. **No fork extensions are included by default** — you opt in.
+
+If your binary is from a fork like `ik_llama.cpp` or `frankenturbo2`, you have access to IK-K extension types (IQ4_K, IQ4_KS, IQ4_KSS, IQ3_K, IQ3_KS) which give the allocator more compression options. To use them, pass `--formats` explicitly:
 
 ```bash
-# Stock-types only (e.g. for Vulkan deployment without IK-K extensions):
+# IK-K-extended (ik_llama.cpp / frankenturbo2 binaries):
 prismaquant-llama pipeline run \
-    --formats Q4_K,Q5_K,Q6_K,Q8_0,IQ4_XS \
-    ...
-
-# Add IQ2_K at your own risk (it's a known PPL cliff and excluded by default):
-prismaquant-llama pipeline run \
-    --formats Q4_K,Q5_K,Q6_K,Q8_0,IQ4_XS,IQ4_K,IQ4_KS,IQ4_KSS,IQ3_K,IQ3_KS,IQ2_K \
+    --formats Q4_K,Q5_K,Q6_K,Q8_0,IQ4_XS,IQ4_K,IQ4_KS,IQ4_KSS,IQ3_K,IQ3_KS \
     ...
 ```
 
-The default 10-format list (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ4_XS`, `IQ4_K`, `IQ4_KS`, `IQ4_KSS`, `IQ3_K`, `IQ3_KS`) is the prismaquant-validated set.
+To see exactly what your binary supports (tagged by `mainline` vs `fork` source):
+
+```bash
+prismaquant-llama discover /path/to/llama-quantize
+```
+
+⚠️ **Avoid `IQ2_K`** even when opting into fork formats — it's a documented PPL cliff (+30 PPL vs F16 across every model we've measured) and the allocator has no good way to know not to pick it under noisy probe data. Reserve for `--formats` runs where you specifically need extreme compression.
 
 ### Re-running with caching
 
