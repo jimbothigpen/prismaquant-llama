@@ -194,32 +194,7 @@ cp examples/default-formats.txt ~/.prismaquant-llama/config/default-formats.txt
 # (then edit to add/remove formats as needed)
 ```
 
-The example file content:
-
-```
-# ---- mainline K-quants (2-bit through 8-bit) ----
-Q2_K
-Q3_K
-Q4_K
-Q5_K
-Q6_K
-Q8_0
-
-# ---- mainline I-quants (imatrix-aware) ----
-IQ2_S
-IQ3_XXS
-IQ3_S
-IQ4_XS
-IQ4_NL
-
-# ---- frankenturbo2 IK-K extensions (ported from ik_llama.cpp) ----
-# Comment these out if your binary doesn't support them.
-IQ3_KS
-IQ3_K
-IQ4_KSS
-IQ4_KS
-IQ4_K
-```
+The shipped example contains mainline llama.cpp formats only (works on any binary). If your binary is a fork (ik_llama, frankenturbo2, etc.), append the fork's extension formats — run `prismaquant-llama discover <binary>` to see what's supported.
 
 Precedence (highest → lowest):
 
