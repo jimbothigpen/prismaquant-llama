@@ -102,6 +102,36 @@ DEFAULT_CACHE_ROOT = PRISMAQUANT_LLAMA_ROOT / "cache" / "binary-types"
 DEFAULT_CONFIG_DIR = PRISMAQUANT_LLAMA_ROOT / "config"
 DEFAULT_SCRATCH_ROOT = PRISMAQUANT_LLAMA_ROOT / "scratch"
 DEFAULT_SYSTEM_PERF_PATH = DEFAULT_CONFIG_DIR / "system-default-format-perf.json"
+DEFAULT_USER_FORMATS_PATH = DEFAULT_CONFIG_DIR / "default-formats.txt"
+
+
+def load_user_default_formats() -> "Optional[list[str]]":
+    """Load user's default formats list from ~/.prismaquant-llama/config/default-formats.txt.
+
+    Returns a list of format names (e.g., ["Q4_K", "Q5_K", ...]) or None
+    if the file doesn't exist or has no usable entries. Lines starting
+    with `#` are comments; blank lines are ignored.
+
+    This sits between the CLI `--formats` flag (highest precedence) and
+    the hardcoded PipelineConfig default (lowest). When set, runs that
+    omit `--formats` will use this list instead of the built-in default.
+    """
+    if not DEFAULT_USER_FORMATS_PATH.exists():
+        return None
+    formats: list[str] = []
+    try:
+        for line in DEFAULT_USER_FORMATS_PATH.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            # Tolerate "Q4_K, Q5_K" or "Q4_K Q5_K" on a single line too.
+            for fmt in line.replace(",", " ").split():
+                fmt = fmt.strip()
+                if fmt:
+                    formats.append(fmt)
+    except OSError:
+        return None
+    return formats or None
 
 # Standard GGUF llama.cpp tools we look for via discovery.
 TOOL_NAMES = {

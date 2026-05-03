@@ -873,6 +873,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]
+        else:
+            # No CLI override → check for user's default-formats.txt
+            from .paths import load_user_default_formats, DEFAULT_USER_FORMATS_PATH
+            user_formats = load_user_default_formats()
+            if user_formats:
+                print(f"[pipeline] using formats from {DEFAULT_USER_FORMATS_PATH}: {','.join(user_formats)}")
+                cfg_kwargs["formats"] = user_formats
         cfg = PipelineConfig(**cfg_kwargs)
         if args.dry_run:
             return dry_run(cfg)
