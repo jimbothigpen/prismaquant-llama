@@ -163,11 +163,58 @@ relying on the heuristic alone:
 | Mode | What it measures | Time (53 formats) | When to use |
 |---|---|---|---|
 | `quick` | output size → bpw | ~25 min on 1B ref model | one-time setup, accurate bpw on this binary |
-| `deep`  | + PPL Δ vs f16, + PP/TG tps | 6-12 hours | weekend job; produces "your binary, your hardware" curve |
+| `deep`  | + PPL Δ vs f16, + PP/TG tps | 25 min – 10 hr (depends on `--chunks`) | produces "your binary, your hardware" curve |
 | `ingest`| reads prismaquant Stage D cost.csv | seconds | automatic, every pipeline run feeds the cache |
 
 Calibrated metadata persists at
-`~/.cache/prismaquant-llama/binary-types/<binary-sha256>-calibrated.json`.
+`~/.cache/prismaquant-llama/binary-types/<binary-sha256>__chunks<N>-calibrated.json`.
+Each chunks tier maintains an independent cache file — re-running at a
+higher tier doesn't cache-hit the lower-tier measurements.
+
+### Chunks presets — PPL-Δ confidence vs. wall time
+
+`calibrate deep` accepts `--chunks N` directly OR one of the named presets:
+
+| Flag | N | Reliable Δ | Use case |
+|---|---:|---:|---|
+| `--quick` | 10 | ±0.20 PPL | smoke test / dev iteration |
+| (default) | **25** | ±0.13 PPL | balanced — ranks adjacent K-quants for most ≥4B models |
+| `--deep` | 50 | ±0.09 PPL | production per-binary perf files |
+| `--thorough` | 100 | ±0.06 PPL | cross-binary baselines |
+| `--reference` | 200 | ±0.04 PPL | one-time global-default ship |
+
+Why this matters: the shipped `examples/format-perf-default.json` is
+calibrated at `--reference` (200 chunks). When the allocator consults
+the perf file, it walks a 4-tier priority chain:
+
+```
+Tier 1: per-binary cache       ~/.cache/.../<sha>__chunks<N>-perf.json
+Tier 2: --format-perf override per-run flag
+Tier 3: system default         ~/.config/prismaquant-llama/system-default-format-perf.json
+Tier 4: package examples       examples/format-perf-default.json   ← shipped at --reference
+```
+
+**Tier 1 always wins over Tier 4** — even if Tier 1 is a `--quick` (10
+chunks) calibration and Tier 4 is `--reference` (200 chunks). This is
+intentional: per-binary captures hardware-specific throughput (pp/tg)
+that the hardware-normalized shipped default deliberately strips. Within
+Tier 1, the highest-chunks variant wins automatically.
+
+⚠️ **Heads-up on calibration quality**: a hasty `--quick` calibration
+on your binary will outrank the high-fidelity shipped default for that
+binary. PPL-Δ noise at chunks=10 can flip the ranking of adjacent
+K-quants, which propagates into allocator scoring. If you want best
+allocation quality:
+
+- Run at least `--deep` (50 chunks) for any per-binary cache you intend
+  to keep (or `--thorough` if you can spare the time).
+- Reserve `--quick` for dev iteration where rankings aren't critical.
+- If a fast calibration is the only one available, the allocator still
+  produces a valid recipe — the worst-case is that it picks a slightly
+  suboptimal format for one or two layers.
+
+To explicitly use the shipped default instead of your local calibration:
+`prismaquant-llama pipeline run --format-perf $(python -c 'import prismaquant_llama, pathlib; print(pathlib.Path(prismaquant_llama.__file__).parents[2] / "examples/format-perf-default.json")') ...`
 
 ## Output directory layout
 
