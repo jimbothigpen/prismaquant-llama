@@ -1,185 +1,149 @@
 {
-  "_comment": "Hardware-agnostic global default format-perf data shipped with prismaquant-llama. Absolute pp/tg are null (would be misleading across hardware); only ratio columns are used by the allocator. Calibrated against Llama-3.2-3B; Q4_0/Q5_0/Q8_0 PP ratios anomaly-normalized (original buggy values preserved as _pp_ratio_normalized_from_anomaly for audit). Run `prismaquant-llama calibrate deep --set-as-system-default` for your hardware-specific values.",
-  "_reference_model": "Llama-3.2-3B-Instruct-BF16.gguf",
-  "_reference_model_sha256": "9b8dce13b6cbcd8b20037bd6383ee8e747b5034ca32f40b5b8ee2efa9ebf56b8",
-  "_reference_model_params": 3212749888,
+  "_comment": "Hardware-agnostic per-format performance data, sanitized from a chunks=200 reference calibration on Qwen/Qwen3-8B / gfx1150 / frankenturbo2. Absolute pp/tg fields are nulled; only ratios ship for cross-hardware portability. Q8_0 pp ratio normalized: see _pp_ratio_normalized_from_anomaly for original.",
+  "_reference_model": "Qwen/Qwen3-8B",
+  "_reference_model_sha256": "9992dae57b55989222bbad7e5fa96ca596d096560ec8554d6de46698740ec820",
+  "_reference_model_params": 8190735360,
   "_binary_sha256": "388862567d9f21c8d4fdd40888b8224aa0a3f5e24e4cc5d5b91ae986d8bddd7b",
-  "_machine_id": "(generic baseline; original calibration was on gfx1150)",
-  "_calibrated_at": "2026-05-02T21:24:47.931420+00:00",
+  "_machine_id": "",
+  "_calibrated_at": "2026-05-03T02:10:02.698153+00:00",
   "_schema_version": 3,
   "_reference_format": "BF16",
-  "Q4_0": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.9639,
-    "tg_ratio_vs_bf16": 3.0009,
-    "ppl": 7.2542,
-    "ppl_delta_vs_f16": 0.4285,
-    "bpw": 4.774,
-    "size_bytes": 1917190336,
-    "_pp_ratio_normalized_from_anomaly": 0.266
-  },
-  "Q4_1": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.9639,
-    "tg_ratio_vs_bf16": 2.7465,
-    "ppl": 7.6156,
-    "ppl_delta_vs_f16": 0.7899,
-    "bpw": 5.2126,
-    "size_bytes": 2093351104
-  },
-  "Q5_0": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.9804,
-    "tg_ratio_vs_bf16": 2.5846,
-    "ppl": 6.8901,
-    "ppl_delta_vs_f16": 0.0644,
-    "bpw": 5.6513,
-    "size_bytes": 2269511872,
-    "_pp_ratio_normalized_from_anomaly": 0.3102
-  },
-  "Q5_1": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.9804,
-    "tg_ratio_vs_bf16": 2.442,
-    "ppl": 6.9834,
-    "ppl_delta_vs_f16": 0.1577,
-    "bpw": 6.0899,
-    "size_bytes": 2445672640
-  },
-  "Q8_0": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.9137,
-    "tg_ratio_vs_bf16": 1.8168,
-    "ppl": 6.8092,
-    "ppl_delta_vs_f16": -0.0165,
-    "bpw": 8.5208,
-    "size_bytes": 3421898944,
-    "_pp_ratio_normalized_from_anomaly": 0.3053
-  },
-  "Q4_K": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.9025,
-    "tg_ratio_vs_bf16": 2.6218,
-    "ppl": 7.0869,
-    "ppl_delta_vs_f16": 0.2612,
-    "bpw": 5.0284,
-    "size_bytes": 2019377344
-  },
-  "Q5_K": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.9618,
-    "tg_ratio_vs_bf16": 2.4542,
-    "ppl": 6.8963,
-    "ppl_delta_vs_f16": 0.0706,
-    "bpw": 5.7823,
-    "size_bytes": 2322153664
-  },
-  "Q6_K": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.7278,
-    "tg_ratio_vs_bf16": 2.1543,
-    "ppl": 6.8629,
-    "ppl_delta_vs_f16": 0.0372,
-    "bpw": 6.5834,
-    "size_bytes": 2643853504
-  },
-  "IQ4_XS": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.3465,
-    "tg_ratio_vs_bf16": 3.1128,
-    "ppl": 7.1301,
-    "ppl_delta_vs_f16": 0.3044,
-    "bpw": 4.584,
-    "size_bytes": 1840906432
-  },
-  "IQ4_K": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.6857,
-    "tg_ratio_vs_bf16": 2.9693,
-    "ppl": 7.2818,
-    "ppl_delta_vs_f16": 0.4561,
-    "bpw": 4.774,
-    "size_bytes": 1917190336
-  },
-  "IQ4_KS": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.742,
-    "tg_ratio_vs_bf16": 3.0928,
-    "ppl": 7.313,
-    "ppl_delta_vs_f16": 0.4873,
-    "bpw": 4.5623,
-    "size_bytes": 1832206528
-  },
-  "IQ4_KSS": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.7411,
-    "tg_ratio_vs_bf16": 3.2403,
-    "ppl": 11.8681,
-    "ppl_delta_vs_f16": 5.0424,
-    "bpw": 4.343,
-    "size_bytes": 1744126144
-  },
-  "IQ3_K": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.689,
-    "tg_ratio_vs_bf16": 3.0111,
-    "ppl": 8.9463,
-    "ppl_delta_vs_f16": 2.1206,
-    "bpw": 3.8418,
-    "size_bytes": 1542848704
-  },
-  "IQ3_KS": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.7475,
-    "tg_ratio_vs_bf16": 3.7476,
-    "ppl": 9.6357,
-    "ppl_delta_vs_f16": 2.81,
-    "bpw": 3.6263,
-    "size_bytes": 1456316608
-  },
-  "IQ2_K": {
-    "pp": null,
-    "tg": null,
-    "pp_ratio_vs_bf16": 0.6874,
-    "tg_ratio_vs_bf16": 4.3805,
-    "ppl": 178.8874,
-    "ppl_delta_vs_f16": 172.0617,
-    "bpw": 2.9097,
-    "size_bytes": 1168507072
-  },
   "F16": {
     "pp": null,
     "tg": null,
-    "pp_ratio_vs_bf16": 0.9133,
-    "tg_ratio_vs_bf16": 1.0001,
-    "ppl": 6.8257,
+    "pp_ratio_vs_bf16": 0.9488,
+    "tg_ratio_vs_bf16": 0.9974,
+    "ppl": 8.1188,
     "ppl_delta_vs_f16": 0.0,
-    "bpw": 16.0204,
-    "size_bytes": 6433687744
+    "bpw": 16.0064,
+    "size_bytes": 16388044128
   },
   "BF16": {
     "pp": null,
     "tg": null,
     "pp_ratio_vs_bf16": 1.0,
     "tg_ratio_vs_bf16": 1.0,
-    "ppl": 6.8179,
-    "ppl_delta_vs_f16": -0.0078,
-    "bpw": 16.0204,
-    "size_bytes": 6433687744
+    "ppl": 8.1275,
+    "ppl_delta_vs_f16": 0.0087,
+    "bpw": 16.0064,
+    "size_bytes": 16388044128
   },
-  "_anomaly_normalized": true
+  "Q4_K": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 1.0352,
+    "tg_ratio_vs_bf16": 2.9654,
+    "ppl": 8.2695,
+    "ppl_delta_vs_f16": 0.1507,
+    "bpw": 4.9107,
+    "size_bytes": 5027784032
+  },
+  "Q5_K": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 1.1116,
+    "tg_ratio_vs_bf16": 2.653,
+    "ppl": 8.1942,
+    "ppl_delta_vs_f16": 0.0754,
+    "bpw": 5.7149,
+    "size_bytes": 5851112800
+  },
+  "Q6_K": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.8243,
+    "tg_ratio_vs_bf16": 2.3543,
+    "ppl": 8.1693,
+    "ppl_delta_vs_f16": 0.0505,
+    "bpw": 6.5693,
+    "size_bytes": 6725899616
+  },
+  "Q8_0": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.9137,
+    "tg_ratio_vs_bf16": 1.8884,
+    "ppl": 8.1494,
+    "ppl_delta_vs_f16": 0.0306,
+    "bpw": 8.5067,
+    "size_bytes": 8709518688
+  },
+  "IQ4_XS": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.3789,
+    "tg_ratio_vs_bf16": 3.287,
+    "ppl": 8.2654,
+    "ppl_delta_vs_f16": 0.1466,
+    "bpw": 4.4863,
+    "size_bytes": 4593296736
+  },
+  "IQ4_K": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.7661,
+    "tg_ratio_vs_bf16": 3.1764,
+    "ppl": 8.3753,
+    "ppl_delta_vs_f16": 0.2565,
+    "bpw": 4.6636,
+    "size_bytes": 4774749536
+  },
+  "IQ4_KS": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.8278,
+    "tg_ratio_vs_bf16": 3.3364,
+    "ppl": 8.413,
+    "ppl_delta_vs_f16": 0.2942,
+    "bpw": 4.4386,
+    "size_bytes": 4544457568
+  },
+  "IQ4_KSS": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.8331,
+    "tg_ratio_vs_bf16": 3.3579,
+    "ppl": 9.2936,
+    "ppl_delta_vs_f16": 1.1748,
+    "bpw": 4.2076,
+    "size_bytes": 4307954528
+  },
+  "IQ3_K": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.773,
+    "tg_ratio_vs_bf16": 3.5759,
+    "ppl": 9.1933,
+    "ppl_delta_vs_f16": 1.0745,
+    "bpw": 3.6818,
+    "size_bytes": 3769611616
+  },
+  "IQ3_KS": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.8549,
+    "tg_ratio_vs_bf16": 4.1864,
+    "ppl": 9.6818,
+    "ppl_delta_vs_f16": 1.563,
+    "bpw": 3.4539,
+    "size_bytes": 3536214112
+  },
+  "IQ2_K": {
+    "pp": null,
+    "tg": null,
+    "pp_ratio_vs_bf16": 0.7755,
+    "tg_ratio_vs_bf16": 5.085,
+    "ppl": 38.4667,
+    "ppl_delta_vs_f16": 30.3479,
+    "bpw": 2.7001,
+    "size_bytes": 2764473696
+  },
+  "_calibration_chunks": 200,
+  "_pp_ratio_normalized_from_anomaly": {
+    "Q8_0": {
+      "original_pp_ratio_vs_bf16": 0.3249,
+      "normalized_to": 0.9137,
+      "reason": "gfx1150 ROCm anomaly \u2014 Q*_0 family pp kernels abnormally slow"
+    }
+  }
 }
