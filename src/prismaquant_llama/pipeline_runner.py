@@ -93,6 +93,14 @@ class PipelineConfig:
     clean_imatrix: bool = False    # also delete _shared/imatrix-cache/<model>-BF16.imatrix.gguf
     clean_probe: bool = False      # also delete _shared/probe/<model>-* (probe.pkl + dirs)
 
+    # Memory strategy. Default --no-mmap is fastest for normal-size models that
+    # fit in host RAM. For models where BF16 size > host RAM (e.g. 122B class
+    # on 31 GB hosts), --no-mmap forces a 244 GB anon allocation that OOMs.
+    # Set use_mmap=True (CLI: --mmap) to drop --no-mmap from Stage D imatrix +
+    # Stage I PPL eval — kernel-managed paging keeps host memory bounded by
+    # whatever the page cache allows. Slower (cephfs/disk-bound) but bounded.
+    use_mmap: bool = False
+
     def __post_init__(self):
         if self.binary is None:
             self.binary = find_binary("quantize")
@@ -358,10 +366,11 @@ def stage_d_imatrix(cfg: PipelineConfig, paths: WorkPaths, bf16_path: Path) -> P
     if not imatrix_bin or not imatrix_bin.exists():
         raise SystemExit("ERROR: llama-imatrix not found alongside llama-quantize")
     _log(paths, "D", f"D. generating imatrix → {cache_path}")
+    mmap_flag = [] if cfg.use_mmap else ["--no-mmap"]
     rc = _run(
         [str(imatrix_bin), "-m", str(bf16_path), "-f", str(cfg.calibration),
          "-o", str(cache_path),
-         "-c", str(cfg.ctx), "-ngl", "99", "--no-mmap",
+         "-c", str(cfg.ctx), "-ngl", "99", *mmap_flag,
          "--chunks", str(cfg.chunks_imatrix),
          # Force f16 KV cache for imatrix calibration. Some forks (e.g.
          # frankenturbo2's experiment/buun-tcq-port branch) build with
@@ -550,11 +559,12 @@ def stage_i_eval(cfg: PipelineConfig, paths: WorkPaths,
         return None
     eval_log = paths.logs_dir / "stage-I.log"
     _log(paths, "I", f"I. PPL eval @ chunks={cfg.chunks_eval}")
+    mmap_flag_eval = [] if cfg.use_mmap else ["--no-mmap"]
     rc = _run(
         [str(perp_bin), "-m", str(final_gguf), "-f", str(cfg.calibration),
          "-c", str(cfg.ctx), "-b", "2048",
          "-ctk", "f16", "-ctv", "f16", "-fa", "on",
-         "-ngl", "99", "--chunks", str(cfg.chunks_eval), "--no-mmap"],
+         "-ngl", "99", "--chunks", str(cfg.chunks_eval), *mmap_flag_eval],
         eval_log, env_extra=_hsa_env(cfg),
     )
     # Parse PPL from log
@@ -815,6 +825,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr.add_argument("--clean-probe", action="store_true",
                     help="also delete _shared/probe/<model>-* after Stage H "
                          "(probe.pkl + per-model dirs; default keep).")
+    pr.add_argument("--mmap", action="store_true", dest="use_mmap",
+                    help="Drop --no-mmap from Stage D imatrix and Stage I PPL eval. "
+                         "Use when BF16 model size > host RAM (e.g. 122B-class "
+                         "models on 31 GB hosts) — without this, llama-imatrix "
+                         "hits OOM during model load. Trade-off: slower I/O-bound "
+                         "stages (cephfs/disk paging) but bounded host RAM.")
     pr.add_argument("--clean-all", action="store_true",
                     help="shorthand for --clean-shared --clean-imatrix --clean-probe. "
                          "After Stage H success, removes every per-model intermediate; "
@@ -843,6 +859,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             clean_shared=args.clean_shared or args.clean_all,
             clean_imatrix=args.clean_imatrix or args.clean_all,
             clean_probe=args.clean_probe or args.clean_all,
+            use_mmap=args.use_mmap,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]
