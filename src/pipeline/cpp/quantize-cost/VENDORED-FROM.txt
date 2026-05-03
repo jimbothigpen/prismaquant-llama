@@ -1,0 +1,10 @@
+# This directory mirrors tools/quantize-cost/ from jimbothigpen/frankenturbo2.
+# Update: run tools/sync-quantize-cost.sh from the prismaquant-llama root,
+# then commit the modified C++ source + CMakeLists.txt + this file together.
+
+source_repo:    https://github.com/jimbothigpen/frankenturbo2
+source_path:    tools/quantize-cost/
+source_sha:     dd6657023b97ffa9a944f00b776311f18fe41470
+source_short:   dd6657023b
+synced_at:      2026-05-03T01:19:55Z
+synced_files:   quantize-cost.cpp, CMakeLists.txt

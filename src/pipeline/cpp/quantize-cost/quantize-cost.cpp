@@ -357,6 +357,19 @@ int main(int argc, char ** argv) {
                 continue;
             }
 
+            // Block-size alignment check: K-quants + most IQ-K types require
+            // n_per_row % blck_size == 0 (typically QK_K=256). gpt-oss-20b's
+            // 2880-wide tensors fail this for any QK_K=256 type. Skip cleanly
+            // with NaN instead of letting ggml_quantize_chunk hit GGML_ASSERT
+            // and abort the whole process.
+            const int64_t blck = ggml_blck_size(tgt.t);
+            if (blck > 0 && n_per_row % blck != 0) {
+                fprintf(out, "%s,%lld,%s,%s,0,nan,0.0\n",
+                        name.c_str(), (long long)n_elements,
+                        ggml_type_name(src_type), tgt.name);
+                continue;
+            }
+
             // Allocate quantized scratch sized for full tensor.
             const size_t row_size = ggml_row_size(tgt.t, n_per_row);
             const size_t qbytes = row_size * n_rows;
