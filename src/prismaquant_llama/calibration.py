@@ -658,6 +658,7 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
                    chunks: int = 4, ctx: int = 2048,
                    machine_id: str = "",
                    env: Optional[dict] = None,
+                   skip_ppl: bool = False,
                    log = print) -> CalibrationFile:
     """
     Mode 2 — Full calibration with PPL + bench. ~5-15 min per format.
@@ -665,6 +666,12 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
 
     perp_binary / bench_binary: paths to llama-perplexity and llama-bench.
     Default: same dir as `binary`.
+
+    skip_ppl: if True, run quantize+bench only (no perplexity). Useful when
+    the host hardware can't run perplexity reliably (e.g. gfx1102 iSWA HIP
+    bug on Gemma-3 / Gemma-4) but bench works fine. The resulting perf
+    file has null ppl/ppl_delta_vs_f16; merge with a PPL-only run from a
+    different host to get a complete cross-machine perf file.
     """
     binary = binary.resolve()
     ref_model = ref_model.resolve()
@@ -672,7 +679,7 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
     perp_binary = perp_binary or (binary.parent / "llama-perplexity")
     bench_binary = bench_binary or (binary.parent / "llama-bench")
 
-    if not perp_binary.exists():
+    if not skip_ppl and not perp_binary.exists():
         raise FileNotFoundError(f"llama-perplexity not found: {perp_binary}")
     if not bench_binary.exists():
         raise FileNotFoundError(f"llama-bench not found: {bench_binary}")
@@ -705,14 +712,18 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
     formats = list(formats)
     log(f"[calibrate-deep] {len(formats)} formats × ~10 min each = "
         f"~{len(formats) * 10 // 60} h estimated")
+    if skip_ppl:
+        log(f"[calibrate-deep] --skip-ppl: bench-only mode (no perplexity)")
     log(f"[calibrate-deep] cache: {output_path}")
 
     # Get/establish f16 reference PPL (needed for ppl_delta_vs_f16). If F16
     # (or BF16 as fallback) is in the format list, move it to the front so
     # subsequent formats can compute Δ as they're measured. If F16 isn't in
     # the list at all and we don't have its ppl cached, prepend it.
+    # When skip_ppl=True there's no PPL to anchor against, so leave format
+    # order untouched.
     f16_ppl = calib.formats.get("F16", FormatMeasurement()).ppl
-    if f16_ppl is None:
+    if not skip_ppl and f16_ppl is None:
         if "F16" in formats:
             formats = ["F16"] + [f for f in formats if f != "F16"]
         elif "BF16" in formats and calib.formats.get("BF16", FormatMeasurement()).ppl is None:
@@ -726,7 +737,8 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
         tmpdir = Path(tmp)
         for i, fmt in enumerate(formats, 1):
             m = calib.formats.get(fmt, FormatMeasurement())
-            if (m.ppl is not None and m.pp512_tps is not None
+            ppl_satisfied = skip_ppl or m.ppl is not None
+            if (ppl_satisfied and m.pp512_tps is not None
                     and m.bpw is not None and m.error is None):
                 log(f"[{i:>3}/{len(formats)}] {fmt:<14} cached (full)")
                 continue
@@ -748,28 +760,31 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
             m.bpw = round(size * 8 / n_params, 4)
             m.quantize_wallclock_sec = round(qdt, 1)
 
-            log(f"             {fmt:<14} ppl... (chunks={chunks}, c={ctx})")
-            t0 = time.time()
-            ppl, ppl_err, plog = _run_perplexity(perp_binary, out, calibration_corpus,
-                                                 chunks=chunks, c=ctx, env=env)
-            pdt = time.time() - t0
-            if ppl is None:
-                m.error = (m.error or "") + " ppl failed;"
+            if skip_ppl:
+                pdt = 0.0
             else:
-                m.ppl = ppl
-                m.ppl_stderr = ppl_err
-                # Set f16_ppl from F16 first; fall back to BF16 if no F16.
-                if fmt == "F16" or (fmt == "BF16" and f16_ppl is None):
-                    f16_ppl = ppl
-                    # Backfill deltas for any prior formats that lacked an
-                    # f16 reference at measurement time.
-                    for prior_fmt, prior_m in calib.formats.items():
-                        if (prior_m.ppl is not None
-                                and prior_m.ppl_delta_vs_f16 is None
-                                and prior_fmt not in ("F16", "BF16")):
-                            prior_m.ppl_delta_vs_f16 = round(prior_m.ppl - f16_ppl, 4)
-                if f16_ppl is not None:
-                    m.ppl_delta_vs_f16 = round(ppl - f16_ppl, 4)
+                log(f"             {fmt:<14} ppl... (chunks={chunks}, c={ctx})")
+                t0 = time.time()
+                ppl, ppl_err, plog = _run_perplexity(perp_binary, out, calibration_corpus,
+                                                     chunks=chunks, c=ctx, env=env)
+                pdt = time.time() - t0
+                if ppl is None:
+                    m.error = (m.error or "") + " ppl failed;"
+                else:
+                    m.ppl = ppl
+                    m.ppl_stderr = ppl_err
+                    # Set f16_ppl from F16 first; fall back to BF16 if no F16.
+                    if fmt == "F16" or (fmt == "BF16" and f16_ppl is None):
+                        f16_ppl = ppl
+                        # Backfill deltas for any prior formats that lacked an
+                        # f16 reference at measurement time.
+                        for prior_fmt, prior_m in calib.formats.items():
+                            if (prior_m.ppl is not None
+                                    and prior_m.ppl_delta_vs_f16 is None
+                                    and prior_fmt not in ("F16", "BF16")):
+                                prior_m.ppl_delta_vs_f16 = round(prior_m.ppl - f16_ppl, 4)
+                    if f16_ppl is not None:
+                        m.ppl_delta_vs_f16 = round(ppl - f16_ppl, 4)
 
             log(f"             {fmt:<14} bench...")
             t0 = time.time()
@@ -902,6 +917,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     pd.add_argument("--machine-id", default="")
     pd.add_argument("--perp-binary", type=Path)
     pd.add_argument("--bench-binary", type=Path)
+    pd.add_argument("--skip-ppl", action="store_true",
+                    help="Skip the perplexity step; quantize + bench only. "
+                         "Useful when the host can't run perplexity reliably "
+                         "but bench works (e.g. gfx1102 iSWA HIP bug on Gemma "
+                         "models). Output perf file has null ppl/Δ; merge with "
+                         "a PPL-only run from a working host for a complete file.")
     pd.add_argument("--set-as-system-default", action="store_true",
                     help="After calibration completes, copy the resulting "
                          "format-perf JSON to ~/.config/prismaquant-llama/"
@@ -943,7 +964,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                            fmts, perp_binary=args.perp_binary,
                            bench_binary=args.bench_binary,
                            output_path=args.output, chunks=chunks_eff, ctx=args.ctx,
-                           machine_id=args.machine_id)
+                           machine_id=args.machine_id,
+                           skip_ppl=getattr(args, "skip_ppl", False))
             if getattr(args, "set_as_system_default", False):
                 # Locate the perf file calibrate_deep just emitted
                 cache_path = args.output or calibration_cache_path(args.binary)
