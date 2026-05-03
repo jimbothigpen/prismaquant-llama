@@ -42,6 +42,9 @@ def _print_root_help() -> None:
         print(f"  {name:<11} {desc}")
     print()
     print("Run `prismaquant-llama <subcommand> --help` for per-subcommand options.")
+    print()
+    print("New here? See docs/GETTING-STARTED.md for a hands-on walkthrough:")
+    print("  https://github.com/jimbothigpen/prismaquant-llama/blob/main/docs/GETTING-STARTED.md")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

@@ -32,6 +32,11 @@ re-build with `-DGGML_BUILD_TOOLS=ON`, and you're done.
 > `pipeline run` subcommand is the real thing. See
 > [What works today](#what-works-today) and [TODO list](#todo).
 
+> 🆕 **New here? Start with [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md)** —
+> a hands-on walkthrough that gets you from zero to a working
+> prismaquant GGUF in ~30 minutes, then walks through calibration,
+> budget/priority customization, and common workflows.
+
 ## What this does
 
 For each Linear in your model, prismaquant picks a *different* ggml
@@ -81,6 +86,11 @@ ensure that fork's `build/bin/llama-quantize-cost` is on `$PATH` (or
 matches the `--binary` directory).
 
 ## Quick run
+
+> Want a guided walkthrough instead of these one-liners?
+> See [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) — covers
+> the same content with explanations, sensible default values, and a
+> stage-by-stage timing table.
 
 ```bash
 # Recommended: full pipeline, auto-budget (25% × BF16), equal-priority
