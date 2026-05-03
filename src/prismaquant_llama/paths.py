@@ -241,6 +241,58 @@ class WorkPaths:
         if self.work.exists():
             shutil.rmtree(self.work)
 
+    def cleanup_shared(self, model_key: str, *,
+                       hf_cache: bool = True,
+                       bf16: bool = True,
+                       imatrix: bool = False,
+                       probe: bool = False) -> dict:
+        """Delete shared cache artifacts for one model. Returns {category: bytes_freed}.
+
+        Default targets the heavy intermediates: HF safetensors snapshot in
+        `_shared/hf-cache/<model_key>/` and the converted BF16 GGUF at
+        `_shared/bf16/<model_key>-BF16.gguf`. Smaller caches (imatrix, probe)
+        are kept by default since they're cheap to retain and useful for
+        re-runs / cross-format experiments — opt in with imatrix=True / probe=True.
+
+        Idempotent: silently skips paths that don't exist.
+        """
+        freed: dict = {}
+
+        def _size(p: Path) -> int:
+            if p.is_file():
+                return p.stat().st_size
+            if p.is_dir():
+                return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            return 0
+
+        if hf_cache:
+            d = self.hf_cache / model_key
+            if d.exists():
+                freed["hf_cache"] = _size(d)
+                shutil.rmtree(d)
+        if bf16:
+            f = self.bf16_dir / f"{model_key}-BF16.gguf"
+            if f.exists():
+                freed["bf16"] = f.stat().st_size
+                f.unlink()
+        if imatrix:
+            f = self.imatrix_cache / f"{model_key}-BF16.imatrix.gguf"
+            if f.exists():
+                freed["imatrix"] = f.stat().st_size
+                f.unlink()
+        if probe:
+            for p in self.probe_dir.glob(f"{model_key}-*"):
+                try:
+                    if p.is_file():
+                        freed["probe"] = freed.get("probe", 0) + p.stat().st_size
+                        p.unlink()
+                    elif p.is_dir():
+                        freed["probe"] = freed.get("probe", 0) + _size(p)
+                        shutil.rmtree(p)
+                except OSError:
+                    pass
+        return freed
+
     def imatrix_cache_path(self, model_sha: str, corpus_sha: str, chunks: int) -> Path:
         """Deterministic path to cached imatrix file. Returns the file path
         whether or not the file currently exists — caller checks exists()."""

@@ -87,6 +87,12 @@ class PipelineConfig:
                                                  # used as fallback before package examples.
                                                  # Can also be set via PRISMAQUANT_DEFAULT_FORMAT_PERF env var.
 
+    # Disk-cleanup knobs — applied after Stage H success. Defaults match
+    # legacy behavior (everything retained; opt-in deletion).
+    clean_shared: bool = False     # delete _shared/hf-cache/<model>/ + _shared/bf16/<model>-BF16.gguf
+    clean_imatrix: bool = False    # also delete _shared/imatrix-cache/<model>-BF16.imatrix.gguf
+    clean_probe: bool = False      # also delete _shared/probe/<model>-* (probe.pkl + dirs)
+
     def __post_init__(self):
         if self.binary is None:
             self.binary = find_binary("quantize")
@@ -591,6 +597,21 @@ def run_full_pipeline(cfg: PipelineConfig) -> Path:
     final_gguf   = stage_h_quantize(cfg, paths, bf16_path, recipe_path, imatrix_path)
     ppl          = stage_i_eval(cfg, paths, final_gguf)
 
+    # Optional cleanup of heavy intermediates (--clean-shared / --clean-imatrix / --clean-probe).
+    if cfg.clean_shared or cfg.clean_imatrix or cfg.clean_probe:
+        safe_name = sanitize_model_name(cfg.hf_model)
+        freed = paths.cleanup_shared(
+            safe_name,
+            hf_cache=cfg.clean_shared,
+            bf16=cfg.clean_shared,
+            imatrix=cfg.clean_imatrix,
+            probe=cfg.clean_probe,
+        )
+        if freed:
+            total_gb = sum(freed.values()) / 1024**3
+            parts = [f"{k}={v/1024**3:.2f}GB" for k, v in freed.items()]
+            _log(paths, "Z", f"Z. cleanup: freed {total_gb:.2f} GB ({', '.join(parts)})")
+
     print()
     print("=" * 70)
     print(f"  ✓ DONE: {final_gguf}")
@@ -600,6 +621,121 @@ def run_full_pipeline(cfg: PipelineConfig) -> Path:
     print(f"    logs: {paths.logs_dir}")
     print("=" * 70)
     return final_gguf
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dry-run: estimate disk footprint without touching anything
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _estimate_disk(cfg: PipelineConfig) -> dict:
+    """Return {category: bytes} estimate. Queries HF for safetensors total."""
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        raise SystemExit("ERROR: huggingface_hub not installed.")
+    api = HfApi()
+    info = api.model_info(repo_id=cfg.hf_model, revision=cfg.hf_revision,
+                          files_metadata=True)
+    weight_exts = (".safetensors", ".bin", ".gguf", ".pt", ".pth", ".npz", ".h5")
+    weight_bytes = sum(
+        (s.size or 0) for s in (info.siblings or [])
+        if s.rfilename.endswith(weight_exts) and (s.size or 0) > 0
+    )
+    tokenizer_other = sum(
+        (s.size or 0) for s in (info.siblings or [])
+        if not s.rfilename.endswith(weight_exts) and (s.size or 0) > 0
+    )
+    safetensors_total = weight_bytes + tokenizer_other
+
+    # BF16 GGUF roughly equals weight_bytes when source is BF16/FP16 (most modern HF
+    # repos). FP32 sources halve to BF16; quantized sources (4-bit, etc.) blow up
+    # back to BF16. We can't know without inspecting config.json, so use weight_bytes
+    # as the base and overcount slightly to be safe.
+    bf16_gguf = max(int(weight_bytes * 1.05), weight_bytes)
+
+    if cfg.budget_gb is not None:
+        target = int(cfg.budget_gb * 1024**3)
+    else:
+        target = int(bf16_gguf * cfg.budget_auto_ratio)
+
+    return {
+        "safetensors": safetensors_total,
+        "bf16_gguf":   bf16_gguf,
+        "imatrix":     5 * 1024**2,    # ~5 MB rule of thumb
+        "probe":       200 * 1024,     # ~200 KB rule of thumb
+        "target_gguf": target,
+    }
+
+
+def _fmt_bytes(b: int) -> str:
+    if b >= 1024**3:
+        return f"{b/1024**3:.2f} GB"
+    if b >= 1024**2:
+        return f"{b/1024**2:.2f} MB"
+    if b >= 1024:
+        return f"{b/1024:.2f} KB"
+    return f"{b} B"
+
+
+def dry_run(cfg: PipelineConfig) -> int:
+    """Print disk-usage estimate and exit. No download, no conversion."""
+    import shutil as _shutil
+    print("=" * 70)
+    print("prismaquant-llama pipeline — DRY RUN (no download / no conversion)")
+    print("=" * 70)
+    print(f"  HF model: {cfg.hf_model}@{cfg.hf_revision}")
+    print(f"  Output:   {cfg.output_root}")
+    print(f"  Budget:   {'auto = '+str(cfg.budget_auto_ratio*100)+'% of BF16' if cfg.budget_gb is None else f'{cfg.budget_gb} GB'}")
+    print(f"  Cleanup:  shared={cfg.clean_shared} imatrix={cfg.clean_imatrix} probe={cfg.clean_probe}")
+    print()
+
+    try:
+        est = _estimate_disk(cfg)
+    except Exception as e:
+        print(f"ERROR: failed to query HF model size: {e}", file=sys.stderr)
+        return 1
+
+    print("Estimated disk usage per stage artifact:")
+    print(f"  Safetensors download (Stage A):    {_fmt_bytes(est['safetensors'])}")
+    print(f"  BF16 GGUF intermediate (Stage B):  {_fmt_bytes(est['bf16_gguf'])}")
+    print(f"  Imatrix cache (Stage D):           {_fmt_bytes(est['imatrix'])}")
+    print(f"  Probe artifacts (Stage C):         {_fmt_bytes(est['probe'])}")
+    print(f"  Target PQ GGUF (Stage H):          {_fmt_bytes(est['target_gguf'])}")
+    print()
+
+    peak = sum(est.values())
+    final_default = peak  # nothing cleaned
+    final_clean_shared = est["imatrix"] + est["probe"] + est["target_gguf"]
+    final_clean_all = est["target_gguf"]
+
+    print(f"Peak disk usage during run:           {_fmt_bytes(peak)}")
+    print(f"Final retained (default, no clean):   {_fmt_bytes(final_default)}")
+    print(f"Final retained with --clean-shared:   {_fmt_bytes(final_clean_shared)}")
+    print(f"Final retained with --clean-{{shared,imatrix,probe}}: {_fmt_bytes(final_clean_all)}")
+    print()
+
+    out = cfg.output_root.expanduser().resolve()
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        free = _shutil.disk_usage(out).free
+        margin = free - peak
+        print(f"Output filesystem free space:         {_fmt_bytes(free)}")
+        if margin < 0:
+            print(f"  ⚠ INSUFFICIENT — short by {_fmt_bytes(-margin)} at peak.")
+            print(f"     With --clean-shared in the same run, peak is unchanged "
+                  f"(cleanup runs AFTER Stage H), so increase free space first.")
+        elif margin < 5 * 1024**3:
+            print(f"  ⚠ TIGHT — only {_fmt_bytes(margin)} margin at peak.")
+        else:
+            print(f"  ✓ ample margin ({_fmt_bytes(margin)})")
+    except Exception as e:
+        print(f"  (could not stat output filesystem: {e})")
+
+    print()
+    print("=" * 70)
+    print("Re-run without --dry-run to execute.")
+    print("=" * 70)
+    return 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -659,6 +795,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "is overridden by the per-binary cache and explicit "
                          "--format-perf). Can also be set via PRISMAQUANT_DEFAULT_FORMAT_PERF "
                          "env var. Legacy alias: --default-tps (deprecated).")
+    pr.add_argument("--clean-shared", action="store_true",
+                    help="after Stage H success, delete _shared/hf-cache/<model>/ and "
+                         "_shared/bf16/<model>-BF16.gguf. The target GGUF in ggufs/ "
+                         "is preserved. Re-running this model later will re-download "
+                         "+ re-convert.")
+    pr.add_argument("--clean-imatrix", action="store_true",
+                    help="also delete _shared/imatrix-cache/<model>-BF16.imatrix.gguf "
+                         "after Stage H (small ~MB file; default keep).")
+    pr.add_argument("--clean-probe", action="store_true",
+                    help="also delete _shared/probe/<model>-* after Stage H "
+                         "(probe.pkl + per-model dirs; default keep).")
+    pr.add_argument("--dry-run", action="store_true",
+                    help="query HF for safetensors size, estimate intermediate + final "
+                         "disk usage, compare against free space on the output filesystem, "
+                         "and exit. No download or conversion.")
 
     args = p.parse_args(argv)
 
@@ -676,10 +827,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             convert_script=args.convert_script,
             format_perf_file=args.format_perf,
             default_format_perf_override=args.default_format_perf,
+            clean_shared=args.clean_shared,
+            clean_imatrix=args.clean_imatrix,
+            clean_probe=args.clean_probe,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]
         cfg = PipelineConfig(**cfg_kwargs)
+        if args.dry_run:
+            return dry_run(cfg)
         try:
             run_full_pipeline(cfg)
             return 0
