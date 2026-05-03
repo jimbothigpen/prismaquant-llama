@@ -60,6 +60,24 @@ def _binary_sha256(binary: Path) -> str:
     return h.hexdigest()
 
 
+def _resolve_scratch_dir(output_path: Optional[Path]) -> Path:
+    """Pick where per-format temp ggufs should land. NEVER /tmp.
+
+    Per-format ref ggufs can be 50-200+ GB on large models; routing them
+    through /tmp risks filling the local filesystem (especially on hosts
+    where /tmp is a small tmpfs/ext4 partition). Always co-locate with the
+    output: if `output_path` is given, use its parent's `_scratch/`; if
+    not, fall back to the cache-root's `_scratch/` (still under the user's
+    home, never /tmp).
+    """
+    if output_path is not None:
+        scratch = output_path.parent / "_scratch"
+    else:
+        scratch = CACHE_ROOT / "_scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    return scratch
+
+
 def calibration_cache_path(binary: Path, chunks: Optional[int] = None) -> Path:
     """Full path to the calibrated-metadata JSON for this binary.
 
@@ -560,7 +578,8 @@ def calibrate_quick(binary: Path, ref_model: Path, formats: Iterable[str],
     log(f"[calibrate-quick] {len(formats)} formats × ~30s each = ~{len(formats)//2} min")
     log(f"[calibrate-quick] cache: {output_path}")
 
-    with tempfile.TemporaryDirectory(prefix="prismaquant-wizard-cal-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="prismaquant-wizard-cal-",
+                                      dir=str(_resolve_scratch_dir(output_path))) as tmp:
         tmpdir = Path(tmp)
         for i, fmt in enumerate(formats, 1):
             existing = calib.formats.get(fmt)
@@ -672,7 +691,8 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
         else:
             formats = ["F16"] + formats   # neither cached nor in list — prepend F16
 
-    with tempfile.TemporaryDirectory(prefix="prismaquant-wizard-cal-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="prismaquant-wizard-cal-",
+                                      dir=str(_resolve_scratch_dir(output_path))) as tmp:
         tmpdir = Path(tmp)
         for i, fmt in enumerate(formats, 1):
             m = calib.formats.get(fmt, FormatMeasurement())
