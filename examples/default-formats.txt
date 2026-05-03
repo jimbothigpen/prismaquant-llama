@@ -1,18 +1,16 @@
-# Local default formats list — used by prismaquant-llama pipeline runs
-# when --formats is not passed on the CLI.
+# Example default formats list — copy to:
+#   ~/.prismaquant-llama/config/default-formats.txt
+# to use as your personal default (overrides the built-in PipelineConfig
+# default when --formats is not passed on the CLI).
 #
-# Precedence: CLI --formats > this file > built-in PipelineConfig default.
-# To revert to the built-in default, just delete this file.
+# Precedence: CLI --formats > this file > built-in default.
+# To revert to built-in, just delete the copy.
 #
-# This list combines:
-#   - mainline llama.cpp formats (works on any binary)
-#   - frankenturbo2 IK-K extensions (works only on ik_llama / frankenturbo2 builds)
-#
-# Confirmed working on /path/to/llama-fork/build/bin/llama-quantize
-# (run `prismaquant-llama discover <binary>` to verify your binary supports them).
-#
-# IQ2_K is intentionally NOT included — documented +30 PPL cliff vs F16
-# across every model measured. IQ4_KT is excluded as slow (trellis quant).
+# This example contains MAINLINE llama.cpp formats only — works on any
+# binary including stock ggml-org/llama.cpp. If your binary is a fork
+# that adds extensions (ik_llama.cpp, frankenturbo2, etc.) you can
+# append those format names below — run `prismaquant-llama discover
+# <binary>` to see what your binary supports.
 
 # ---- mainline K-quants (2-bit through 8-bit) ----
 Q2_K
@@ -29,9 +27,8 @@ IQ3_S
 IQ4_XS
 IQ4_NL
 
-# ---- frankenturbo2 IK-K extensions (ported from ik_llama.cpp) ----
-IQ3_KS
-IQ3_K
-IQ4_KSS
-IQ4_KS
-IQ4_K
+# ---- intentionally excluded ----
+# IQ1_S, IQ1_M:    very lossy (1-bit), poor allocator targets
+# IQ2_K (ik):      documented +30 PPL cliff vs F16
+# Q4_K_S/Q4_K_M:   llama-quantize CLI presets, not per-tensor types
+#                  (prismaquant uses the base type Q4_K)
