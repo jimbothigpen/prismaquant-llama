@@ -782,7 +782,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     pd.add_argument("--calibration-corpus", type=Path, required=True)
     pd.add_argument("--formats", required=True)
     pd.add_argument("--output", type=Path)
-    pd.add_argument("--chunks", type=int, default=4)
+    pd.add_argument("--chunks", type=int, default=None,
+                    help="number of llama-perplexity chunks per format. Overrides "
+                         "any --quick/--deep/--thorough/--reference preset. "
+                         "Default when no preset given: 25 (balanced — reliably "
+                         "ranks adjacent K-quants for most 4B+ models).")
+    chunks_preset = pd.add_mutually_exclusive_group()
+    chunks_preset.add_argument("--quick", dest="chunks_preset", action="store_const", const=10,
+                    help="N=10 chunks. Fast iteration / sanity check. "
+                         "Reliably distinguishes only ~0.5+ PPL gaps.")
+    chunks_preset.add_argument("--deep", dest="chunks_preset", action="store_const", const=50,
+                    help="N=50 chunks. Production perf files. Reliably "
+                         "distinguishes adjacent K-quants (~0.10 PPL).")
+    chunks_preset.add_argument("--thorough", dest="chunks_preset", action="store_const", const=100,
+                    help="N=100 chunks. Cross-binary baseline. Reliable for "
+                         "~0.05 PPL diffs.")
+    chunks_preset.add_argument("--reference", dest="chunks_preset", action="store_const", const=200,
+                    help="N=200 chunks. Publication-grade. Use for the one-time "
+                         "global-default perf file you ship in examples/.")
     pd.add_argument("--ctx", type=int, default=2048)
     pd.add_argument("--machine-id", default="")
     pd.add_argument("--perp-binary", type=Path)
@@ -820,10 +837,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             calibrate_quick(args.binary, args.ref_model, fmts,
                             output_path=args.output, machine_id=args.machine_id)
         else:
+            # Resolve effective chunk count from the precedence:
+            #   explicit --chunks N > --quick/--deep/--thorough/--reference > default 25
+            preset = getattr(args, "chunks_preset", None)
+            chunks_eff = args.chunks if args.chunks is not None else (preset or 25)
             calib = calibrate_deep(args.binary, args.ref_model, args.calibration_corpus,
                            fmts, perp_binary=args.perp_binary,
                            bench_binary=args.bench_binary,
-                           output_path=args.output, chunks=args.chunks, ctx=args.ctx,
+                           output_path=args.output, chunks=chunks_eff, ctx=args.ctx,
                            machine_id=args.machine_id)
             if getattr(args, "set_as_system_default", False):
                 # Locate the perf file calibrate_deep just emitted
