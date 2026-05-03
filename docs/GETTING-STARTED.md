@@ -176,6 +176,8 @@ Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0,
 IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, IQ4_NL
 ```
 
+> 📝 **About `Q4_K_S` / `Q4_K_M` / `Q3_K_L` etc.** — these are *whole-model presets* of the regular `llama-quantize` CLI (e.g., `Q4_K_M` = "mostly Q4_K plus Q6_K for output"). They aren't separate ggml types. Per-tensor formats are the base types only: `Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K`. prismaquant *is itself* a per-tensor mixer — it does what `_S/_M/_L` presets do, but with allocator-driven tensor-level decisions instead of fixed pinning rules. So you'd never include `Q4_K_M` in `--formats` (it's redundant with prismaquant's job). `discover --all` shows the variants annotated as CLI-only.
+
 This keeps prismaquant-llama compatible with stock `ggml-org/llama.cpp` builds out of the box. **No fork extensions are included by default** — you opt in.
 
 To see exactly what your binary supports + get copy-paste-ready preset strings:
