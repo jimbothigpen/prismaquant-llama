@@ -806,6 +806,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr.add_argument("--clean-probe", action="store_true",
                     help="also delete _shared/probe/<model>-* after Stage H "
                          "(probe.pkl + per-model dirs; default keep).")
+    pr.add_argument("--clean-all", action="store_true",
+                    help="shorthand for --clean-shared --clean-imatrix --clean-probe. "
+                         "After Stage H success, removes every per-model intermediate; "
+                         "only the target GGUF in ggufs/ + per-run logs in work/ remain.")
     pr.add_argument("--dry-run", action="store_true",
                     help="query HF for safetensors size, estimate intermediate + final "
                          "disk usage, compare against free space on the output filesystem, "
@@ -827,9 +831,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             convert_script=args.convert_script,
             format_perf_file=args.format_perf,
             default_format_perf_override=args.default_format_perf,
-            clean_shared=args.clean_shared,
-            clean_imatrix=args.clean_imatrix,
-            clean_probe=args.clean_probe,
+            clean_shared=args.clean_shared or args.clean_all,
+            clean_imatrix=args.clean_imatrix or args.clean_all,
+            clean_probe=args.clean_probe or args.clean_all,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]
