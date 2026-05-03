@@ -51,7 +51,11 @@ def _convention_metadata_paths(binary_path: Optional[Path]) -> list[Path]:
     return paths
 
 
-CACHE_ROOT = Path.home() / ".cache" / "prismaquant-wizard" / "binary-types"
+# Centralized in paths.py.
+try:
+    from .paths import DEFAULT_CACHE_ROOT as CACHE_ROOT
+except ImportError:
+    from paths import DEFAULT_CACHE_ROOT as CACHE_ROOT  # type: ignore
 
 # Lines look like:  "  52  or  IQ4_K   :  4.50 bpw imatrix 4-bit (ik_llama)"
 # or:               "  17  or  Q5_K    : alias for Q5_K_M"

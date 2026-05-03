@@ -31,6 +31,7 @@ actively want to find).
 """
 
 from __future__ import annotations
+import os
 import re
 import shutil
 import sys
@@ -74,10 +75,33 @@ def sanitize_model_name(hf_model_id: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Defaults
+# Defaults — single root for everything
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# Layout under PRISMAQUANT_LLAMA_ROOT:
+#   builds/                  ← pipeline outputs (--output default)
+#       <model>-prismaquant/
+#           _shared/, ggufs/, work/
+#   cache/binary-types/      ← per-binary calibration JSONs (perf, calibrated)
+#   config/                  ← system-wide preferences
+#       system-default-format-perf.json
+#   scratch/                 ← per-format temp ggufs (calibrate-deep)
+#
+# All overridable individually via flags, OR globally via the env var:
+#   PRISMAQUANT_LLAMA_ROOT=/some/path  → relocates everything
+#
+# Legacy lookups (~/prismaquant-builds, ~/.cache/prismaquant-{llama,wizard},
+# ~/.config/prismaquant-llama) remain supported for read in
+# find_format_perf_file_for_binary so existing data is still discovered.
+PRISMAQUANT_LLAMA_ROOT = Path(
+    os.environ.get("PRISMAQUANT_LLAMA_ROOT") or (Path.home() / ".prismaquant-llama")
+)
 
-DEFAULT_OUTPUT_ROOT = Path.home() / "prismaquant-builds"
+DEFAULT_OUTPUT_ROOT = PRISMAQUANT_LLAMA_ROOT / "builds"
+DEFAULT_CACHE_ROOT = PRISMAQUANT_LLAMA_ROOT / "cache" / "binary-types"
+DEFAULT_CONFIG_DIR = PRISMAQUANT_LLAMA_ROOT / "config"
+DEFAULT_SCRATCH_ROOT = PRISMAQUANT_LLAMA_ROOT / "scratch"
+DEFAULT_SYSTEM_PERF_PATH = DEFAULT_CONFIG_DIR / "system-default-format-perf.json"
 
 # Standard GGUF llama.cpp tools we look for via discovery.
 TOOL_NAMES = {

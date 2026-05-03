@@ -49,7 +49,12 @@ from typing import Optional, Iterable
 # Cache layout
 # ─────────────────────────────────────────────────────────────────────────────
 
-CACHE_ROOT = Path.home() / ".cache" / "prismaquant-wizard" / "binary-types"
+# Centralized in paths.py (paths.DEFAULT_CACHE_ROOT). Backward-compat lookups
+# for legacy locations still happen in find_format_perf_file_for_binary.
+try:
+    from .paths import DEFAULT_CACHE_ROOT as CACHE_ROOT
+except ImportError:
+    from paths import DEFAULT_CACHE_ROOT as CACHE_ROOT  # type: ignore
 
 
 def _binary_sha256(binary: Path) -> str:
@@ -277,7 +282,15 @@ def export_format_perf_subset(calib: CalibrationFile, output_path: Path,
     return n_emitted
 
 
-SYSTEM_DEFAULT_PERF_PATH = (
+# Centralized in paths.py. Backward-compat: if the legacy
+# ~/.config/prismaquant-llama/system-default-format-perf.json exists and
+# the new path doesn't, auto-discovery still finds the legacy file.
+try:
+    from .paths import DEFAULT_SYSTEM_PERF_PATH as SYSTEM_DEFAULT_PERF_PATH
+except ImportError:
+    from paths import DEFAULT_SYSTEM_PERF_PATH as SYSTEM_DEFAULT_PERF_PATH  # type: ignore
+
+_LEGACY_SYSTEM_DEFAULT_PERF_PATH = (
     Path.home() / ".config" / "prismaquant-llama" / "system-default-format-perf.json"
 )
 
@@ -323,8 +336,12 @@ def find_format_perf_file_for_binary(binary: Path,
     import re
     sha = _binary_sha256(binary)
     sha_short = sha[:16]
-    # Cache dirs: new (`prismaquant-llama`) + legacy (`prismaquant-wizard`).
+    # Cache dirs (priority order):
+    #   1. ~/.prismaquant-llama/cache/binary-types/  (current default)
+    #   2. ~/.cache/prismaquant-llama/binary-types/  (legacy, pre-consolidation)
+    #   3. ~/.cache/prismaquant-wizard/binary-types/ (oldest, wizard-era)
     cache_dirs = [
+        CACHE_ROOT,  # new default → ~/.prismaquant-llama/cache/binary-types/
         Path.home() / ".cache" / "prismaquant-llama" / "binary-types",
         Path.home() / ".cache" / "prismaquant-wizard" / "binary-types",
     ]
@@ -366,9 +383,12 @@ def find_format_perf_file_for_binary(binary: Path,
             default_format_perf_override = Path(env_override)
     if default_format_perf_override is not None and default_format_perf_override.exists():
         return default_format_perf_override
-    # System default (user wrote via `calibrate deep --set-as-system-default`)
+    # System default (user wrote via `calibrate deep --set-as-system-default`).
+    # Check new location first, fall back to legacy ~/.config/prismaquant-llama/.
     if SYSTEM_DEFAULT_PERF_PATH.exists():
         return SYSTEM_DEFAULT_PERF_PATH
+    if _LEGACY_SYSTEM_DEFAULT_PERF_PATH.exists():
+        return _LEGACY_SYSTEM_DEFAULT_PERF_PATH
     # Package-shipped baseline. The default file is intentionally hardware-
     # agnostic — format-relative throughput ratios transfer roughly across
     # GPUs (within ~20%) so a single calibrated reference serves as a sane
