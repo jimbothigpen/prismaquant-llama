@@ -487,13 +487,23 @@ def calibrate_quick(binary: Path, ref_model: Path, formats: Iterable[str],
     calib = load_calibration_file(output_path)
     n_params = count_gguf_params(ref_model)
 
-    # Update header (don't overwrite if existing entries are still valid)
+    # Cache invalidation: per-format measurements are ref_model-specific (PPL,
+    # bpw, size_bytes all depend on the model being quantized). The cache
+    # filename is binary-only, so a previous run against a different model
+    # leaves stale entries that look "complete" — drop them on ref_model mismatch.
+    current_ref_sha = file_sha256(ref_model)
+    if calib.header.ref_model_sha256 and calib.header.ref_model_sha256 != current_ref_sha:
+        log(f"[calibrate-quick] cache reset: existing cache was for "
+            f"ref_model={calib.header.ref_model} (sha={calib.header.ref_model_sha256[:16]}); "
+            f"now using {ref_model.name} (sha={current_ref_sha[:16]})")
+        calib = CalibrationFile()
+
+    # Update header (don't overwrite binary_sha if existing entries are still valid)
     if not calib.header.binary_sha256:
         calib.header.binary_path = str(binary)
         calib.header.binary_sha256 = _binary_sha256(binary)
     calib.header.ref_model = ref_model.name
-    if not calib.header.ref_model_sha256:
-        calib.header.ref_model_sha256 = file_sha256(ref_model)
+    calib.header.ref_model_sha256 = current_ref_sha
     calib.header.ref_model_params = n_params
     calib.header.machine_id = machine_id or calib.header.machine_id
     calib.header.calibrated_at = datetime.now(timezone.utc).isoformat()
@@ -575,13 +585,20 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
     calib = load_calibration_file(output_path)
     n_params = count_gguf_params(ref_model)
 
+    # Cache invalidation on ref_model change (see note in calibrate_quick).
+    current_ref_sha = file_sha256(ref_model)
+    if calib.header.ref_model_sha256 and calib.header.ref_model_sha256 != current_ref_sha:
+        log(f"[calibrate-deep] cache reset: existing cache was for "
+            f"ref_model={calib.header.ref_model} (sha={calib.header.ref_model_sha256[:16]}); "
+            f"now using {ref_model.name} (sha={current_ref_sha[:16]})")
+        calib = CalibrationFile()
+
     # Header bookkeeping (same as quick)
     if not calib.header.binary_sha256:
         calib.header.binary_path = str(binary)
         calib.header.binary_sha256 = _binary_sha256(binary)
     calib.header.ref_model = ref_model.name
-    if not calib.header.ref_model_sha256:
-        calib.header.ref_model_sha256 = file_sha256(ref_model)
+    calib.header.ref_model_sha256 = current_ref_sha
     calib.header.ref_model_params = n_params
     calib.header.calibration_corpus = str(calibration_corpus)
     calib.header.wikitext_chunks = chunks
