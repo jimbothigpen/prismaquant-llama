@@ -5,7 +5,13 @@
 
 A CLI + interactive TUI that adapts the prismaquant allocator
 (originally targeted at vLLM / compressed-tensors) to work with **any
-prismaquant-enabled fork** of [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp).
+build of llama.cpp** — mainline
+[`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp) or any
+fork. The only build requirement on the llama.cpp side is the
+`llama-quantize-cost` tool, whose source is vendored in this repo
+([`src/pipeline/cpp/quantize-cost/`](src/pipeline/cpp/quantize-cost/));
+drop those two files into your llama.cpp's `tools/quantize-cost/`,
+re-build with `-DGGML_BUILD_TOOLS=ON`, and you're done.
 
 > **Disclosure — this is vibe-coded.** I'm an enthusiast, not a
 > programmer. Every line of code, doc, and commit message in this repo
@@ -229,19 +235,31 @@ To explicitly use the shipped default instead of your local calibration:
     ├── bf16/, probe/, costs/, recipes/, logs/
 ```
 
-## How forks plug in
+## How any llama.cpp build plugs in
 
-A prismaquant-enabled fork only needs to do two things:
+prismaquant-llama works against **any llama.cpp source tree** — mainline
+`ggml-org/llama.cpp` or any fork. The contract is exactly two pieces:
 
-1. Ship `tools/prismaquant/run-pipeline.sh` (or use the bundled one in
-   this package's `src/pipeline/`).
-2. *Optionally* ship `tools/prismaquant/format_metadata_<forkname>.json`
-   describing fork-specific weight quants.
+1. **Required**: build `llama-quantize-cost`. The source lives at
+   [`src/pipeline/cpp/quantize-cost/`](src/pipeline/cpp/quantize-cost/)
+   in this repo (a single `.cpp` + `CMakeLists.txt`). Copy that
+   directory into your llama.cpp's `tools/quantize-cost/`, register it
+   in your top-level `tools/CMakeLists.txt` (`add_subdirectory(quantize-cost)`),
+   and rebuild with `-DGGML_BUILD_TOOLS=ON`. The standard
+   `llama-quantize`, `llama-perplexity`, `llama-bench`, and
+   `llama-imatrix` come with any llama.cpp build by default — no
+   patches needed there.
 
-Step 2 is **strictly optional** — fork-specific formats without
-metadata are heuristic-classified and surfaced under `--all-formats`.
-Maintainer-supplied metadata is purely additive polish (curated
-`recommend` flags + helpful `note` strings).
+2. *Optional*: ship `tools/prismaquant/format_metadata_<forkname>.json`
+   describing your fork's weight quants. Without this, fork-specific
+   formats are still discovered automatically (via `<binary> --help`
+   parsing) and heuristic-classified; maintainer-supplied metadata is
+   purely additive polish (curated `recommend` flags + helpful `note`
+   strings).
+
+That's it — no other patches, hooks, or fork modifications. If your
+build's binaries respond to standard `--help` and produce GGUFs, the
+allocator works.
 
 ## Repo layout
 
