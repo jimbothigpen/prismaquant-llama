@@ -138,13 +138,13 @@ prismaquant-llama pipeline run \
 
 ### Priority — PPL/TG/PP weighting
 
-The 3-digit `XYZ` priority code controls the allocator's preference:
+The 3-digit `XYZ` priority code controls the allocator's preference. **The three digits should sum to 9** (the allocator normalizes them to ratios, so `333` and `111` mean the same thing — but using `9` as the total is the convention so all examples are directly comparable).
 
-- **X** = PPL-quality weight (1-9)
-- **Y** = TG (token generation) speed weight (1-9)
-- **Z** = PP (prompt processing) speed weight (1-9)
+- **X** = PPL-quality weight (0-9)
+- **Y** = TG (token generation) speed weight (0-9)
+- **Z** = PP (prompt processing) speed weight (0-9)
 
-Common combinations:
+Common combinations (all sum to 9):
 
 | Priority | Use case |
 |---|---|
@@ -152,7 +152,9 @@ Common combinations:
 | `522` | Quality-first — best PPL at the budget (production-grade output) |
 | `252` | TG-first — fast generation (chat / streaming use) |
 | `225` | PP-first — fast prompt eval (long-context use) |
-| `911` | Maximum-quality, ignore speed |
+| `900` | Pure-quality — completely ignore speed (the original allocator's behavior before multi-objective was added) |
+| `441` | Quality + TG, minimal PP weight |
+| `414` | Quality + PP, minimal TG weight |
 
 ```bash
 # Quality-first run (explicit budget + priority):
