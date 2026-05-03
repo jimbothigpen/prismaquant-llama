@@ -512,6 +512,16 @@ def _run_perplexity(perp_binary: Path, model: Path, calibration: Path,
         return None, None, "timeout"
     m = re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)", log)
     if not m:
+        # On parse miss, surface the exit code + last log lines so callers
+        # can diagnose silent failures (e.g. ROCm crashes, SIGABRT).
+        # Many builds print their actual error to stderr just before
+        # exiting with a non-zero code; capturing here avoids the trap of
+        # ppl=None being reported with no debugging info.
+        import sys as _sys
+        print(f"[_run_perplexity] WARN exit={proc.returncode}, no 'Final estimate' line. "
+              f"Last log lines:", file=_sys.stderr)
+        for line in (log.splitlines()[-15:]):
+            print(f"  | {line}", file=_sys.stderr)
         return None, None, log
     return float(m.group(1)), float(m.group(2)), log
 
