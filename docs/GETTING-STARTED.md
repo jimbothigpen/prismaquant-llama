@@ -169,30 +169,30 @@ prismaquant-llama pipeline run \
 
 ### Format whitelist
 
-The allocator default is **mainline llama.cpp formats only**:
+The allocator default is **mainline llama.cpp formats** spanning 2-bit through 8-bit:
 
 ```
-Q4_K, Q5_K, Q6_K, Q8_0, IQ4_XS
+Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0,
+IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, IQ4_NL
 ```
 
 This keeps prismaquant-llama compatible with stock `ggml-org/llama.cpp` builds out of the box. **No fork extensions are included by default** — you opt in.
 
-If your binary is from a fork like `ik_llama.cpp` or `frankenturbo2`, you have access to IK-K extension types (IQ4_K, IQ4_KS, IQ4_KSS, IQ3_K, IQ3_KS) which give the allocator more compression options. To use them, pass `--formats` explicitly:
-
-```bash
-# IK-K-extended (ik_llama.cpp / frankenturbo2 binaries):
-prismaquant-llama pipeline run \
-    --formats Q4_K,Q5_K,Q6_K,Q8_0,IQ4_XS,IQ4_K,IQ4_KS,IQ4_KSS,IQ3_K,IQ3_KS \
-    ...
-```
-
-To see exactly what your binary supports (tagged by `mainline` vs `fork` source):
+To see exactly what your binary supports + get copy-paste-ready preset strings:
 
 ```bash
 prismaquant-llama discover /path/to/llama-quantize
 ```
 
-⚠️ **Avoid `IQ2_K`** even when opting into fork formats — it's a documented PPL cliff (+30 PPL vs F16 across every model we've measured) and the allocator has no good way to know not to pick it under noisy probe data. Reserve for `--formats` runs where you specifically need extreme compression.
+The discover command emits a "Suggested --formats presets" section that lists, for your specific binary:
+
+- **conservative** (5 mainline staples) — safe for any binary
+- **wide mainline** (allocator's default) — adds 2/3-bit options
+- **wide + IK-K extensions** — only shown if your binary supports them (ik_llama, frankenturbo2, etc.)
+
+Pick the preset you want and paste the entire `--formats` string into your `pipeline run` command.
+
+⚠️ **`IQ2_K` is excluded from all presets** — it's a documented PPL cliff (+30 PPL vs F16 across every model we've measured). Mainline 2-bit i-quants (`IQ2_S`, `IQ2_XS`, `IQ2_XXS`) are also lossy but allocator-tolerable. `IQ1_S` and `IQ1_M` are very lossy and excluded too. If you specifically need extreme compression, you can add any of these via explicit `--formats`.
 
 ### Re-running with caching
 

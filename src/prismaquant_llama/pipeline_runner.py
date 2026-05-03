@@ -66,15 +66,18 @@ class PipelineConfig:
                                         # ≈ slightly tighter than IQ4_XS (27-29% real-world)
     formats: list[str] = field(default_factory=lambda: [
         # Mainline llama.cpp formats only — keeps prismaquant-llama compatible
-        # with stock ggml-org/llama.cpp builds out of the box.
-        # To use ik_llama / frankenturbo / similar fork extensions (IQ4_K,
-        # IQ4_KS, IQ4_KSS, IQ3_K, IQ3_KS, etc.), pass `--formats` explicitly
-        # with the extension types appended. `prismaquant-llama discover
-        # <binary>` lists everything your binary supports, tagged by source.
-        # Note: IQ2_K (and similar 2-bit IK-K extensions) is a reliable PPL
-        # cliff (+30 PPL vs F16 across every model measured) and should not
-        # be added to this list even when opting into fork formats.
-        "Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ4_XS",
+        # with stock ggml-org/llama.cpp builds out of the box. To use
+        # ik_llama / frankenturbo / similar fork extensions (IQ4_K, IQ4_KS,
+        # IQ4_KSS, IQ3_K, IQ3_KS, etc.), pass `--formats` explicitly with the
+        # extension types appended. `prismaquant-llama discover <binary>`
+        # lists everything your binary supports + suggests --formats strings.
+        # Coverage: 2-bit through 8-bit. Note that 2-bit i-quants are
+        # "very lossy" territory; allocator may pick them for low-sensitivity
+        # tensors, but if results look poor try --formats with just Q4_K and
+        # up (5-format conservative).
+        "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_0",   # K-quants
+        "IQ2_S", "IQ3_XXS", "IQ3_S",                       # i-quants 2/3-bit
+        "IQ4_XS", "IQ4_NL",                                # i-quants 4-bit
     ])
     pinned: dict[str, str] = field(default_factory=lambda: {
         "output.weight": "Q6_K",

@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import os
 import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -297,11 +298,18 @@ def discover_formats(
         if cached is not None:
             return _filter(cached, all_formats=all_formats)
 
-    # Run --help and parse
+    # Run --help and parse. Inject LD_LIBRARY_PATH for binaries that depend
+    # on libllama.so installed alongside (e.g., /path/to/llama.cpp/build/bin + /opt/llama/lib).
+    env = dict(os.environ)
+    bin_dir = binary_path.parent
+    candidate_lib_dirs = [bin_dir, bin_dir.parent / "lib", bin_dir]  # try sibling-bin, ../lib, then bin again
+    extra_paths = [str(p) for p in candidate_lib_dirs if p.is_dir()]
+    if extra_paths:
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(extra_paths + [env.get("LD_LIBRARY_PATH", "")])
     try:
         proc = subprocess.run(
             [str(binary_path), "--help"],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=30, check=False, env=env,
         )
         help_text = proc.stdout + "\n" + proc.stderr
     except subprocess.TimeoutExpired:
@@ -449,6 +457,54 @@ def main(argv: Optional[list[str]] = None) -> int:
         bpw = f"{info.bpw:.2f}" if info.bpw is not None else "?"
         note = info.note or ("(no curated metadata)" if not info.in_metadata else "")
         print(f"  {name:<12} {bpw:>6}  {info.family:<8} {info.source:<14} {note}")
+
+    # Suggested --formats presets — computed from full availability (always
+    # use all_formats=True so recommended-only table still shows wide preset).
+    fmts_all = (fmts if args.all
+                else discover_formats(args.binary, all_formats=True, use_cache=not args.no_cache))
+    print()
+    print("Suggested --formats presets (copy-paste into `prismaquant-llama pipeline run`):")
+    print()
+
+    # Conservative mainline (5 staples)
+    conservative = ["Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ4_XS"]
+    conservative_avail = [f for f in conservative if f in fmts_all]
+    if len(conservative_avail) >= 4:
+        print(f"  conservative (mainline staples — safe for any binary):")
+        print(f"    --formats {','.join(conservative_avail)}")
+        print()
+
+    # Wide mainline — adds 2- and 3-bit formats
+    wide_mainline = ["Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_0",
+                     "IQ2_S", "IQ3_XXS", "IQ3_S",
+                     "IQ4_XS", "IQ4_NL"]
+    wide_avail = [f for f in wide_mainline if f in fmts_all and fmts_all[f].source == "mainline"]
+    if len(wide_avail) >= 7:
+        print(f"  wide mainline (broad bpw coverage, allocator's default):")
+        print(f"    --formats {','.join(wide_avail)}")
+        print()
+
+    # Mainline + IK-K (only if binary supports them)
+    ikk_extensions = ["IQ4_K", "IQ4_KS", "IQ4_KSS", "IQ3_K", "IQ3_KS"]
+    ikk_avail = [f for f in ikk_extensions if f in fmts_all]
+    if ikk_avail:
+        wide_plus_ikk = wide_avail + ikk_avail
+        print(f"  wide + IK-K extensions (this binary supports {len(ikk_avail)} fork formats):")
+        print(f"    --formats {','.join(wide_plus_ikk)}")
+        print()
+
+    # Note about formats not in any preset — known PPL cliffs / very lossy
+    # only. Q2_K's "extreme low-bit" hedge is for non-imatrix workflows;
+    # prismaquant always builds imatrix in Stage D, so Q2_K is fine to include.
+    extreme_excluded = []
+    cliff_types = {"IQ2_K"}    # documented +30 PPL cliff with imatrix
+    for name, info in fmts_all.items():
+        if name in cliff_types or (info.note and "very lossy" in info.note):
+            extreme_excluded.append(name)
+    if extreme_excluded:
+        print(f"  (excluded from suggestions — known PPL cliffs / very lossy):")
+        print(f"    {', '.join(extreme_excluded)}")
+        print(f"  Add via --formats only if you specifically need extreme compression.")
     return 0
 
 
