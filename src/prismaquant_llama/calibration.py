@@ -456,8 +456,15 @@ def _run_perplexity(perp_binary: Path, model: Path, calibration: Path,
                     chunks: int = 4, c: int = 2048, env: Optional[dict] = None,
                     timeout: float = 1800) -> tuple[Optional[float], Optional[float], str]:
     """Run llama-perplexity. Returns (ppl, stderr, log)."""
+    # Force f16 KV cache. Calibration should always use neutral KV regardless
+    # of the binary's compile-time inference default. Some forks (e.g.
+    # frankenturbo2's experiment/buun-tcq-port) build with turbo3_tcq as the
+    # default SWA cache, which crashes on gfx1102 + iSWA archs (Gemma-3/4)
+    # mid-decode. Explicit f16 sidesteps that and keeps PPL numbers
+    # comparable across forks/branches.
     cmd = [str(perp_binary), "-m", str(model), "-f", str(calibration),
            "-c", str(c), "-ngl", "99", "-fa", "on",
+           "-ctk", "f16", "-ctv", "f16",
            "--chunks", str(chunks), "--no-mmap"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -474,9 +481,13 @@ def _run_perplexity(perp_binary: Path, model: Path, calibration: Path,
 def _run_bench(bench_binary: Path, model: Path, p: int = 512, n: int = 128,
                threads: int = 12, timeout: float = 600) -> tuple[Optional[float], Optional[float], str]:
     """Run llama-bench. Returns (pp_tps, tg_tps, log)."""
+    # Force f16 KV (same rationale as _run_perplexity). For pp/tg numbers we
+    # want the binary's straightforward GEMM throughput, not perturbed by a
+    # compile-time KV default that may crash on iSWA archs on gfx1102.
     cmd = [str(bench_binary), "-m", str(model),
            "-p", str(p), "-n", str(n),
            "-t", str(threads), "-ngl", "99", "-fa", "1",
+           "-ctk", "f16", "-ctv", "f16",
            "--output", "csv"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
