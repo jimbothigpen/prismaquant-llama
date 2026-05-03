@@ -60,9 +60,22 @@ def _binary_sha256(binary: Path) -> str:
     return h.hexdigest()
 
 
-def calibration_cache_path(binary: Path) -> Path:
-    """Full path to the calibrated-metadata JSON for this binary."""
+def calibration_cache_path(binary: Path, chunks: Optional[int] = None) -> Path:
+    """Full path to the calibrated-metadata JSON for this binary.
+
+    When `chunks` is provided, the path is chunk-tier-keyed
+    (`<bsha>__chunks<N>-calibrated.json`) so re-running at a higher tier
+    (--deep, --thorough, --reference) doesn't cache-hit the lower-tier
+    measurements. Each tier maintains an independent cache.
+
+    When `chunks` is None, returns the legacy unchunked path — kept
+    for backward compatibility with files emitted by earlier versions
+    and for the `set-default-perf` / `ingest` subcommands that don't
+    know the chunk count.
+    """
     bsha = _binary_sha256(binary)
+    if chunks is not None:
+        return CACHE_ROOT / f"{bsha[:16]}__chunks{int(chunks)}-calibrated.json"
     return CACHE_ROOT / f"{bsha[:16]}-calibrated.json"
 
 
@@ -289,21 +302,45 @@ def find_format_perf_file_for_binary(binary: Path,
     Returns None if no candidate file exists.
     """
     import os
+    import re
     sha = _binary_sha256(binary)
     sha_short = sha[:16]
     # Cache dirs: new (`prismaquant-llama`) + legacy (`prismaquant-wizard`).
-    # Filenames: new (`<sha>-perf.json`) + legacy (`<sha>-tps.json`).
-    # Each may use full sha or 16-char prefix. Search the cross-product.
     cache_dirs = [
         Path.home() / ".cache" / "prismaquant-llama" / "binary-types",
         Path.home() / ".cache" / "prismaquant-wizard" / "binary-types",
     ]
+    # Filename layouts (new chunks-keyed, then legacy unchunked, then -tps):
+    #   <sha>__chunks<N>-perf.json   (new — picks highest N when multiple)
+    #   <sha>-perf.json              (legacy unchunked)
+    #   <sha>-tps.json               (oldest naming; pre-rename)
+    # Among multiple chunks-keyed candidates, prefer the highest chunks count
+    # (more samples → tighter PPL stderr → more reliable allocator inputs).
+    # Legacy unchunked files rank below any chunks-keyed file (effectively
+    # treated as chunks=0 for sort purposes) since their fidelity is unknown.
+    def _chunks_of(name: str) -> int:
+        m = re.search(r"__chunks(\d+)-(perf|tps)\.json$", name)
+        return int(m.group(1)) if m else 0
+
+    candidates: list[tuple[int, Path]] = []
     for cd in cache_dirs:
-        for name in (f"{sha_short}-perf.json", f"{sha}-perf.json",
-                     f"{sha_short}-tps.json", f"{sha}-tps.json"):
-            cand = cd / name
-            if cand.exists():
-                return cand
+        if not cd.exists():
+            continue
+        for stem in (sha_short, sha):
+            # Chunks-keyed (new naming).
+            for f in cd.glob(f"{stem}__chunks*-perf.json"):
+                candidates.append((_chunks_of(f.name), f))
+            for f in cd.glob(f"{stem}__chunks*-tps.json"):
+                candidates.append((_chunks_of(f.name), f))
+            # Legacy unchunked.
+            for legacy in (cd / f"{stem}-perf.json",
+                           cd / f"{stem}-tps.json"):
+                if legacy.exists():
+                    candidates.append((0, legacy))
+    if candidates:
+        # Highest chunks first; ties broken by file mtime (newer wins).
+        candidates.sort(key=lambda kv: (kv[0], kv[1].stat().st_mtime), reverse=True)
+        return candidates[0][1]
     # User local default (CLI flag or env var)
     if default_format_perf_override is None:
         env_override = os.environ.get("PRISMAQUANT_DEFAULT_FORMAT_PERF")
@@ -571,7 +608,7 @@ def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
     """
     binary = binary.resolve()
     ref_model = ref_model.resolve()
-    output_path = output_path or calibration_cache_path(binary)
+    output_path = output_path or calibration_cache_path(binary, chunks=chunks)
     perp_binary = perp_binary or (binary.parent / "llama-perplexity")
     bench_binary = bench_binary or (binary.parent / "llama-bench")
 
