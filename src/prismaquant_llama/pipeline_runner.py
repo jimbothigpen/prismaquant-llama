@@ -362,7 +362,16 @@ def stage_d_imatrix(cfg: PipelineConfig, paths: WorkPaths, bf16_path: Path) -> P
         [str(imatrix_bin), "-m", str(bf16_path), "-f", str(cfg.calibration),
          "-o", str(cache_path),
          "-c", str(cfg.ctx), "-ngl", "99", "--no-mmap",
-         "--chunks", str(cfg.chunks_imatrix)],
+         "--chunks", str(cfg.chunks_imatrix),
+         # Force f16 KV cache for imatrix calibration. Some forks (e.g.
+         # frankenturbo2's experiment/buun-tcq-port branch) build with
+         # turbo3_tcq as the default SWA cache type, which crashes on
+         # gfx1102 with iSWA arches like gemma-3 ("ROCm error: unspecified
+         # launch failure" inside ggml_backend_cuda_synchronize). f16 is
+         # the right neutral choice for calibration regardless of inference
+         # default — we want the reference activation distribution, not a
+         # quant-perturbed one.
+         "-ctk", "f16", "-ctv", "f16"],
         paths.logs_dir / "stage-D.log", env_extra=_hsa_env(cfg),
     )
     if rc != 0 or not cache_path.exists():
