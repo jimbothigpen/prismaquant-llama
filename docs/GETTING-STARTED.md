@@ -80,6 +80,12 @@ prismaquant-llama pipeline run \
     --output ~/quants/gemma-3-4b-it-prismaquant
 ```
 
+> 💡 **`--binary` and `--calibration` can become optional** once you set defaults in `~/.prismaquant-llama/config/config.toml` (see [Setting persistent preferences via `config.toml`](#setting-persistent-preferences-via-configtoml) below). After first-time configuration, this command shrinks to:
+> ```bash
+> prismaquant-llama pipeline run --hf-model unsloth/gemma-3-4b-it -o ~/quants/gemma-3-4b-it-prismaquant
+> ```
+> Many users never need to type `--binary` or `--calibration` again after their initial setup.
+
 This will:
 
 | Stage | What it does | Wall time |
@@ -420,11 +426,25 @@ prismaquant-llama paths layout --root ~/quants/some-output-dir
 prismaquant-llama paths find-binaries
 
 # What formats does my llama-quantize binary support?
-prismaquant-llama discover --binary /path/to/llama-quantize
+# (also emits "Suggested --formats presets" footer with copy-paste-ready strings:
+#  conservative / wide mainline / wide + IK-K extensions if your binary supports them)
+prismaquant-llama discover /path/to/llama-quantize
 
 # Run a calibration (see step 4 above)
 prismaquant-llama calibrate deep --help
 ```
+
+### Per-user config files (cheat sheet)
+
+All in `~/.prismaquant-llama/config/`:
+
+| File | Purpose | Format |
+|---|---|---|
+| `config.toml` | All persistent prefs: paths, default binary set, budget ratio, priority, calibration corpus, mmap behavior, etc. | TOML — see `examples/config.toml` |
+| `default-formats.txt` | Personal default `--formats` list (line-oriented, comments OK) | One format per line |
+| `system-default-format-perf.json` | System-wide perf file (set by `calibrate deep --set-as-system-default`) | JSON, tool-generated |
+
+CLI args always win over these files. Missing keys/files fall through to built-in defaults.
 
 ### Environment variables
 
@@ -432,14 +452,15 @@ prismaquant-llama calibrate deep --help
 |---|---|
 | `PRISMAQUANT_DEFAULT_FORMAT_PERF=/path/to/perf.json` | Override the auto-discovered perf file |
 | `PRISMAQUANT_PROBE_RETAIN_CROSS_CHUNK=0` | Disable LayerCache retention across probe chunks (memory-tight hosts) |
+| `PRISMAQUANT_LLAMA_ROOT=/path/to/dir` | Override the root for `~/.prismaquant-llama/` (cache + config + builds) |
 
 ### Useful flags summary
 
 ```bash
 prismaquant-llama pipeline run \
     --hf-model HF_ID                         # required
-    --binary PATH                            # auto-discovered if omitted
-    --calibration PATH                       # required
+    --binary PATH                            # optional if [binaries.<default_set>] in config.toml; else auto-discover via $PATH
+    --calibration PATH                       # optional if [defaults] calibration_corpus in config.toml; else required
     --output DIR                             # required
     --budget-gb FLOAT                        # exact target size
     --budget-auto-ratio 0.25                 # alternative: fraction of BF16
