@@ -29,7 +29,7 @@ SUBCOMMANDS = {
                   "prismaquant_llama.calibration"),
     "paths":     ("inspect path layout and discover llama.cpp tool binaries",
                   "prismaquant_llama.paths"),
-    "pipeline":  ("direct pipeline exec (run-pipeline.sh) without the TUI",
+    "pipeline":  ("end-to-end pipeline run (download → quantize → eval)",
                   "prismaquant_llama.pipeline_runner"),
 }
 
@@ -81,10 +81,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         module = importlib.import_module(module_path)
     except ImportError as e:
         print(f"prismaquant-llama: failed to import {module_path}: {e}", file=sys.stderr)
-        if first == "pipeline":
-            print(f"  (Subcommand `pipeline` is not yet implemented — see "
-                  f"src/pipeline/README.md for direct script invocation.)",
-                  file=sys.stderr)
         return 1
 
     if not hasattr(module, "main"):

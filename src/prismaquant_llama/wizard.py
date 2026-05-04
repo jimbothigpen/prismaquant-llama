@@ -7,7 +7,7 @@ The flow + CLI-equivalent printing is wired up so you can see the shape.
 Run with --dry-run to walk through the screens without executing the
 pipeline.
 
-Pipeline stages this wizard wraps (see ../run-pipeline.sh for full detail):
+Pipeline stages this wizard wraps (canonical implementation in pipeline_runner.py):
 
     A. download HF safetensors                      → screen 1
     B. select calibration corpus                    → screen 2
@@ -179,7 +179,7 @@ def screen_2_calibration(state: WizardState) -> None:
     │   ( ) the-pile         (broad domain mix)                    │
     │   (•) (custom path)                                          │
     │                                                              │
-    │ Custom path: /mnt/cephfs/0/Container/models/wikitext103-...  │
+    │ Custom path: /path/to/calibration-corpus.txt                 │
     │                                                              │
     │  [ Continue ]   [ Back ]                                     │
     └──────────────────────────────────────────────────────────────┘
@@ -390,8 +390,8 @@ def run_pipeline(state: WizardState, dry_run: bool = False,
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         description="prismaquant interactive wizard (stub) — interactive TUI for "
-                    "customizing prismaquant GGUF builds. Wraps tools/prismaquant/"
-                    "run-pipeline.sh in any prismaquant-enabled fork.")
+                    "customizing prismaquant GGUF builds. Wraps the "
+                    "`prismaquant-llama pipeline run` flow.")
     p.add_argument("--dry-run", action="store_true",
                    help="walk screens, print CLI plan, don't execute")
     p.add_argument("--resume", type=Path,

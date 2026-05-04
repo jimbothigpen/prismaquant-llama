@@ -77,9 +77,9 @@ slow-PP outliers are still acceptable picks — `5.25-090`, `5.25-252`,
 balanced 333 by Δ −0.024 (>2× stderr) — slight PP-leaning improves
 quality at this constrained budget without sacrificing throughput.
 
-Logs: `~/kernel-work/prismaquant-experiment/qwopus-pipeline/stage-h-summary.csv`
-(also stage-h logs per recipe). Bench and PPL are pre-cached for
-re-evaluation on different chunks counts or KV-cache types.
+Bench and PPL data is cached per `<output>/work/<run-id>/logs/`,
+permitting re-evaluation on different chunks counts or KV-cache types
+without re-quantizing.
 
 ### Pareto picks for Qwopus3.5-9B-v3.5
 
@@ -150,7 +150,7 @@ The total is `Σ_t Δloss(t, fmt[t])`. Minimizing this under a size constraint i
 
 ## Pipeline (current Qwen3.6 implementation)
 
-Source: [`tools/prismaquant/`](tools/prismaquant/) (in-repo). The original development copy lives outside the repo at `/home/builduser/kernel-work/prismaquant-experiment/` for working artifacts (probe pickles, cost CSVs, generated recipes); the master pipeline + reusable scripts + reference recipes are checked in.
+Source: `src/prismaquant_llama/pipeline_runner.py` orchestrates the full A→I sequence; helper scripts (allocator, HF→GGUF bridge) live under [`src/pipeline/scripts/`](../src/pipeline/scripts/) and the cost-measurement binary source under [`src/pipeline/cpp/quantize-cost/`](../src/pipeline/cpp/quantize-cost/).
 
 ```
 A. probe.pkl                          (HF Fisher trace; one bf16 forward pass)
@@ -248,7 +248,7 @@ Looking at the full chunks=100 PPL data alongside the recipe format distribution
 
 - **Prismaquant's value lives at tight budgets** (≤ ~25% of BF16 size). Diverse multi-format mixing forces the allocator to actually distinguish high-Fisher from low-Fisher tensors, which is where the per-tensor surrogate is most informative.
 - **At loose budgets, well-designed uniform quants** (TQ4_1S, IQ4_K, Q5_K_M) can match or beat the allocator. Don't pay the prismaquant pipeline cost (probe + cost + allocator) if your budget is already at 50%+ of BF16.
-- **The "pure-PPL" priority (`900`) over-uses Q8_0** on hardware where Q8_0 has runtime cost (e.g. gfx1150 PP: 2.6× slower than Q5_K_M). Multi-priority allocator with `tps` weights avoids this trap by penalizing slow formats — see [`tools/prismaquant/`](tools/prismaquant/) for the `--priority NNN` knob.
+- **The "pure-PPL" priority (`900`) over-uses Q8_0** on hardware where Q8_0 has runtime cost (e.g. gfx1150 PP: 2.6× slower than Q5_K_M). Multi-priority allocator with `tps` weights avoids this trap by penalizing slow formats — see [`src/pipeline/scripts/allocator.py`](../src/pipeline/scripts/allocator.py) for the `--priority NNN` knob implementation.
 - **Budget = 14 GB on this 35B model = ~20% of BF16**. The sweet spot for prismaquant is "20-30% of BF16," where multi-format mixing is forced by tight bits.
 
 ---
@@ -344,7 +344,8 @@ Before trusting a run, sanity-check:
 
 ## See also
 
-- [`tools/prismaquant/`](tools/prismaquant/) — the in-repo pipeline (run-pipeline.sh, allocator.py, bridge_probe_to_gguf.py, format-tps-gfx1150.json, reference recipes)
-- [`WEIGHT-QUANTS.md`](WEIGHT-QUANTS.md) — per-format PPL/perf data for the candidate formats
-- [`tools/quantize-cost/`](tools/quantize-cost/) — the cost-measurement binary
+- [`docs/GETTING-STARTED.md`](GETTING-STARTED.md) — hands-on tutorial for the full pipeline
+- [`src/pipeline/scripts/`](../src/pipeline/scripts/) — allocator + HF→GGUF bridge (Python)
+- [`src/pipeline/cpp/quantize-cost/`](../src/pipeline/cpp/quantize-cost/) — cost-measurement binary source
+- [`examples/recipes/`](../examples/recipes/) — sample allocator outputs to inspect the per-tensor format mapping
 - [Upstream prismaquant](https://github.com/RobTand/prismaquant) — the original tool (vLLM/compressed-tensors target)

@@ -289,18 +289,20 @@ prismaquant-llama/
 │   │   ├── format_metadata_base.json  base metadata (mainline + ikllama)
 │   │   ├── calibration.py          empirical bpw / PPL / bench calibration
 │   │   └── paths.py                binary discovery + output dir tree
-│   └── pipeline/                   ← shell + python pipeline scripts
-│       ├── run-pipeline.sh          master orchestrator
-│       ├── scripts/allocator.py     multi-choice knapsack solver
-│       ├── scripts/bridge_probe_to_gguf.py  HF→GGUF tensor name bridge
-│       ├── comparison-sweep/        staged comparison sweep tooling
-│       └── PARAMETERIZATION-TODO.md (scripts have hard-coded paths; refactor before publish)
+│   └── pipeline/                   ← stage helpers invoked by pipeline_runner
+│       ├── scripts/allocator.py            multi-choice knapsack solver
+│       ├── scripts/bridge_probe_to_gguf.py HF→GGUF tensor-name bridge
+│       └── cpp/quantize-cost/              source for llama-quantize-cost (Stage E)
 ├── examples/
-│   ├── recipes/                    sample allocator outputs
+│   ├── recipes/                            sample allocator outputs
 │   ├── pinned-tensors-qwen36.json
-│   └── format-tps-gfx1150.json
+│   ├── format-perf-default.json            shipped per-format size/PPL/perf table
+│   ├── format_metadata_ikllama.json        ik_llama IK-K family metadata
+│   ├── default-formats.txt                 personal-default formats list template
+│   └── config.toml                         ~/.prismaquant-llama/config/config.toml template
 ├── docs/
-│   └── methodology.md               prismaquant methodology + recipe gallery
+│   ├── GETTING-STARTED.md          hands-on tutorial
+│   └── methodology.md              prismaquant methodology + recipe gallery
 ├── pyproject.toml
 └── README.md (this file)
 ```
@@ -334,7 +336,7 @@ prismaquant-llama pipeline run \
 
 ### Validated end-to-end on
 
-- `google/gemma-4-E4B-it` (~4B effective, iSWA hybrid — required upstream prismaquant patches; see [`docs/gemma4-profile.md`](docs/gemma4-profile.md))
+- `google/gemma-4-E4B-it` (~4B effective, iSWA hybrid — needed our [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant) fork's Gemma-4 patches)
 - `unsloth/gpt-oss-20b-BF16` (~20B MoE — clean DefaultProfile path)
 - `Jackrong/Qwopus3.5-9B-v3.5` (~9B dense; original validation set, 28-row sweep across 3 budgets × 9 priorities)
 
@@ -348,7 +350,6 @@ What's still missing for production-readiness:
 - [ ] **Recipe preview before execute** — show estimated final size + per-tensor format breakdown before Stage H runs
 - [ ] **Per-stage retry + better diagnostics** on transient failures
 - [ ] **prismaquant upstream PRs** — our [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant) fork carries 8 generic + 1 architecture-specific patch ([`FORK-NOTES.md`](https://github.com/jimbothigpen/prismaquant/blob/main/FORK-NOTES.md)). Generic patches are clean upstream candidates; PRs deferred until prismaquant-llama gets a few weeks of in-use validation
-- [ ] **Parameterize `src/pipeline/*`** legacy shell scripts (largely superseded by `pipeline_runner.py`; keep for reference until removed)
 
 ## License
 
@@ -358,7 +359,8 @@ MIT (see LICENSE).
 
 Issues + PRs welcome. The wizard component is intentionally small (4 screens, 4 modules);
 resist scope creep there. Power users who need anything beyond the 4 dimensions the
-wizard exposes should fall through to `src/pipeline/run-pipeline.sh` directly.
+wizard exposes should drive the pipeline directly via `prismaquant-llama pipeline run`
+(see `pipeline run --help` for the full flag set).
 
 ## Relationship to upstream prismaquant
 

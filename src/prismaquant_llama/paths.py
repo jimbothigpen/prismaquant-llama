@@ -488,7 +488,7 @@ def add_path_args(parser) -> None:
                         "(keeps probe + costs + intermediate BF16)")
     g.add_argument("--output-ggufs", type=Path, default=None,
                    help="override just the ggufs/ subdir (e.g., put final "
-                        "GGUFs in /mnt/cephfs/models/ instead of <output>/ggufs/)")
+                        "GGUFs on a shared filesystem instead of <output>/ggufs/)")
     g.add_argument("--hf-cache", type=Path, default=None,
                    help="override HF safetensors cache dir (default: <output>/_shared/hf-cache)")
     g.add_argument("--imatrix-cache", type=Path, default=None,
