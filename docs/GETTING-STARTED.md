@@ -37,10 +37,18 @@ You need:
 
 1. **A llama.cpp binary set** with `llama-quantize`, `llama-imatrix`, `llama-perplexity`, `llama-bench`. Any modern fork works (mainline, ik_llama, frankenturbo2, etc.). Build them once and put them on disk. **For zero-config runs, make sure these binaries are on `$PATH`** (the tool will find them automatically); otherwise pass `--binary` explicitly.
 
-2. **`llama-quantize-cost`** — Stage E (cost measurement) needs a custom binary called `llama-quantize-cost` that lives in the *same directory* as `llama-quantize`. **This is NOT in mainline llama.cpp** — it was developed for the prismaquant pipeline and is currently shipped via [`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2) (a llama.cpp fork). Two ways to get it:
+2. **`llama-quantize-cost`** — Stage E (cost measurement) needs a custom binary called `llama-quantize-cost` that lives in the *same directory* as `llama-quantize`. **It's NOT in mainline llama.cpp**, but the source is shipped right here in `prismaquant-llama` at `src/pipeline/cpp/quantize-cost/`. To build it, drop that directory into your llama.cpp tree's `tools/`, add `add_subdirectory(quantize-cost)` to `tools/CMakeLists.txt`, then rebuild:
 
-   - **(a) Build `frankenturbo2`** — clone and build that fork; `llama-quantize-cost` will appear in `build/bin/` alongside `llama-quantize`. This is the path of least resistance.
-   - **(b) Drop the source into your existing llama.cpp build** — `prismaquant-llama` ships the canonical source under `src/pipeline/cpp/quantize-cost/`. Copy that directory into your llama.cpp tree's `tools/`, add `add_subdirectory(quantize-cost)` to `tools/CMakeLists.txt`, then `cmake --build build --target llama-quantize-cost`. See [`src/pipeline/cpp/quantize-cost/README.md`](../src/pipeline/cpp/quantize-cost/README.md) for the full recipe (it links against `ggml` + llama.cpp's quantization kernels, can't be built standalone).
+   ```bash
+   cp -r /path/to/prismaquant-llama/src/pipeline/cpp/quantize-cost \
+         /path/to/your/llama.cpp/tools/
+   echo 'add_subdirectory(quantize-cost)' >> /path/to/your/llama.cpp/tools/CMakeLists.txt
+   cmake --build /path/to/your/llama.cpp/build --target llama-quantize-cost
+   ```
+
+   The resulting binary lands in `build/bin/llama-quantize-cost` next to `llama-quantize`. Works against any llama.cpp tree — mainline, `ik_llama`, etc. (it links `ggml` + the quantization kernels; can't be built standalone). See [`src/pipeline/cpp/quantize-cost/README.md`](../src/pipeline/cpp/quantize-cost/README.md) for the full notes.
+
+   *Shortcut*: if you happen to be building [`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2) for other reasons, it already has the tool integrated — `llama-quantize-cost` appears in `build/bin/` automatically.
 
 3. **The `prismaquant` Python package** — Stage C (Hessian probe) shells out to `python3 -m prismaquant.incremental_probe`. Use **our fork** at [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant), which carries patches needed for Gemma-4 (iSWA + KV-sharing) and NemotronH (Mamba-2 hybrid) architectures that haven't been upstreamed yet. The upstream original at [`RobTand/prismaquant`](https://github.com/RobTand/prismaquant) (which RobTand designed and built — see methodology credit above) works for simpler architectures but will fail on those models.
 
@@ -525,7 +533,7 @@ prismaquant-llama pipeline run \
 
 **"llama-quantize not found"** — pass `--binary /full/path/to/llama-quantize`. Or: `prismaquant-llama paths find-binaries` to see what was auto-discovered.
 
-**"llama-quantize-cost not found at <path>"** (Stage E fail) — `llama-quantize-cost` lives next to `llama-quantize` and isn't in mainline llama.cpp. Either point `--binary` at a build of [`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2) (which ships it), or build the canonical source: copy `src/pipeline/cpp/quantize-cost/` from this repo into your llama.cpp tree's `tools/`, register it in `tools/CMakeLists.txt`, and rebuild. See prerequisite #2 + the README under that source dir for the recipe.
+**"llama-quantize-cost not found at <path>"** (Stage E fail) — the binary needs to live next to `llama-quantize`. The source is bundled in this package at `src/pipeline/cpp/quantize-cost/`; copy that directory into your llama.cpp tree's `tools/`, add `add_subdirectory(quantize-cost)` to `tools/CMakeLists.txt`, and rebuild. See prerequisite #2 for the full recipe.
 
 **"prismaquant package not installed"** (Stage C fail) — Stage C calls `python3 -m prismaquant.incremental_probe`. Install our fork: `pip install git+https://github.com/jimbothigpen/prismaquant.git` (carries Gemma-4 + NemotronH patches not yet upstreamed). The upstream original at `RobTand/prismaquant` works for simpler architectures.
 
