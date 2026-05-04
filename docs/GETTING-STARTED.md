@@ -80,11 +80,16 @@ prismaquant-llama pipeline run \
     --output ~/quants/gemma-3-4b-it-prismaquant
 ```
 
-> 💡 **`--binary`, `--calibration`, and `--output` can all become optional** once you set defaults in `~/.prismaquant-llama/config/config.toml` (see [Setting persistent preferences via `config.toml`](#setting-persistent-preferences-via-configtoml) below). After first-time configuration, this command shrinks to:
+> 💡 **Of the four flags above, only `--hf-model` and `--calibration` are strictly required.**
+> - `--binary` is auto-discovered via `$PATH` if omitted (falls through `find_binary("quantize")`).
+> - `--output` defaults to `~/.prismaquant-llama/builds/<model-name>-prismaquant/` if omitted (per-model subdir auto-derived from `--hf-model`).
+> - `--calibration` becomes optional once you set `[defaults] calibration_corpus` in `~/.prismaquant-llama/config/config.toml` (see [Setting persistent preferences via `config.toml`](#setting-persistent-preferences-via-configtoml) below).
+>
+> After config.toml setup, the minimum command shrinks all the way to:
 > ```bash
 > prismaquant-llama pipeline run --hf-model unsloth/gemma-3-4b-it
 > ```
-> Output lands in `<output_root>/<model-name>-prismaquant/` automatically (per-model subdir auto-derived from the model name). Many users never need to type any of those flags again after their initial setup.
+> All other flags (priority, budget, formats, etc.) also have built-in defaults you can override per-run on the CLI.
 
 This will:
 
@@ -459,9 +464,9 @@ CLI args always win over these files. Missing keys/files fall through to built-i
 ```bash
 prismaquant-llama pipeline run \
     --hf-model HF_ID                         # required
-    --binary PATH                            # optional if [binaries.<default_set>] in config.toml; else auto-discover via $PATH
-    --calibration PATH                       # optional if [defaults] calibration_corpus in config.toml; else required
-    --output, -o DIR                         # optional; defaults to [paths] output_root from config.toml or ~/.prismaquant-llama/builds/. Per-model subdir auto-derived from --hf-model.
+    --binary PATH                            # optional; auto-discovers via $PATH (use [binaries.<default_set>] in config.toml to pin a specific build)
+    --calibration PATH                       # required unless [defaults] calibration_corpus in config.toml
+    --output, -o DIR                         # optional; defaults to ~/.prismaquant-llama/builds/, override via [paths] output_root in config.toml. Per-model subdir auto-derived from --hf-model.
     --budget-gb FLOAT                        # exact target size
     --budget-auto-ratio 0.25                 # alternative: fraction of BF16
     --budget-band-gb 0.25                    # allocator wiggle room
