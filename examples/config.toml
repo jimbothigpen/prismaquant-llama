@@ -7,6 +7,13 @@
 #
 # Precedence: CLI flag > this file > built-in default.
 #
+# By default, prismaquant-llama:
+#   - keeps working files under ~/.prismaquant-llama/
+#   - looks up llama.cpp tools (llama-quantize, etc.) on $PATH
+#   - uses 25%-of-BF16 budget, 333 priority, --no-mmap=false
+# This example shows the structure; uncomment + edit only what you want
+# to override.
+#
 # This is a TOML file. Common gotchas:
 #   - strings need quotes: priority = "333" (not 333)
 #   - paths can use ~ for home: output_root = "~/quants"
@@ -15,7 +22,10 @@
 
 [paths]
 # Where prismaquant-llama keeps working files. ~ expands to your home dir.
-# Defaults are subdirs of ~/.prismaquant-llama/.
+# Defaults (commented values below) are subdirs of ~/.prismaquant-llama/.
+# Override only if you have a big external drive or shared filesystem
+# where you want the working data to live.
+#
 # output_root  = "~/.prismaquant-llama/builds"
 # hf_cache     = "~/.prismaquant-llama/cache/hf"
 # binary_cache = "~/.prismaquant-llama/cache/binary-types"
@@ -24,23 +34,29 @@
 
 
 [binaries]
-# Default binary set. Multiple sets can be registered (see below);
-# this picks which one is used when --binary isn't passed on the CLI.
-# default_set = "mainline"
-
-# [binaries.mainline]
+# Default binary set. By default this section is empty and prismaquant
+# falls back to discovering llama.cpp tools on $PATH (the same way you'd
+# run them yourself: `llama-quantize`, `llama-imatrix`, etc. resolve via
+# the standard shell-PATH lookup).
+#
+# You only need to set [binaries] entries if:
+#   - your binaries aren't on $PATH (e.g., a per-project build dir)
+#   - you want to register multiple binary sets (e.g., one mainline build
+#     + one fork build) and switch between them per-run
+#
+# Replace `/path/to/...` with your actual paths. Use absolute paths.
+#
+# default_set = "my-build"
+#
+# [binaries.my-build]
 # quantize      = "/path/to/llama.cpp/build/bin/llama-quantize"
 # imatrix       = "/path/to/llama.cpp/build/bin/llama-imatrix"
 # perplexity    = "/path/to/llama.cpp/build/bin/llama-perplexity"
 # bench         = "/path/to/llama.cpp/build/bin/llama-bench"
 # quantize_cost = "/path/to/llama.cpp/build/bin/llama-quantize-cost"
-
-# [binaries.frankenturbo2]
-# quantize      = "/path/to/llama-fork/build/bin/llama-quantize"
-# imatrix       = "/path/to/llama-fork/build/bin/llama-imatrix"
-# perplexity    = "/path/to/llama-fork/build/bin/llama-perplexity"
-# bench         = "/path/to/llama-fork/build/bin/llama-bench"
-# quantize_cost = "/path/to/llama-fork/build/bin/llama-quantize-cost"
+#
+# To find what binaries you have available:
+#     prismaquant-llama paths find-binaries
 
 
 [defaults]
@@ -67,7 +83,7 @@
 # ctx = 4096
 
 # If true, default behavior is --no-mmap (faster on systems where mmap
-# is slow). User can override per-run with --mmap.
+# is slow, e.g. cephfs / NFS). User can override per-run with --mmap.
 # no_mmap = false
 
 
