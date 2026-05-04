@@ -37,18 +37,26 @@ You need:
 
 1. **A llama.cpp binary set** with `llama-quantize`, `llama-imatrix`, `llama-perplexity`, `llama-bench`. Any modern fork works (mainline, ik_llama, frankenturbo2, etc.). Build them once and put them on disk. **For zero-config runs, make sure these binaries are on `$PATH`** (the tool will find them automatically); otherwise pass `--binary` explicitly.
 
-2. **`llama-quantize-cost`** — Stage E (cost measurement) needs a custom binary called `llama-quantize-cost` that lives in the *same directory* as `llama-quantize`. **This is NOT in mainline llama.cpp.** Two ways to get it:
+2. **`llama-quantize-cost`** — Stage E (cost measurement) needs a custom binary called `llama-quantize-cost` that lives in the *same directory* as `llama-quantize`. **This is NOT in mainline llama.cpp** — it was developed for the prismaquant pipeline and is currently shipped via [`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2) (a llama.cpp fork). Two ways to get it:
 
-   - **(a) Use a fork that already ships it** — the original [RobTand/prismaquant fork](https://github.com/RobTand/llama.cpp) has it; some downstream forks (frankenturbo2, etc.) have imported it.
-   - **(b) Drop it into your own llama.cpp build** — the package ships the source under `src/pipeline/cpp/quantize-cost/`. Copy that directory into your fork's `tools/` tree, add `add_subdirectory(quantize-cost)` to `tools/CMakeLists.txt`, then `cmake --build build --target llama-quantize-cost`. See [`src/pipeline/cpp/quantize-cost/README.md`](../src/pipeline/cpp/quantize-cost/README.md) for the full recipe (you need llama.cpp source to build against — it links `ggml` and the quantization kernels, can't be built standalone).
+   - **(a) Build `frankenturbo2`** — clone and build that fork; `llama-quantize-cost` will appear in `build/bin/` alongside `llama-quantize`. This is the path of least resistance.
+   - **(b) Drop the source into your existing llama.cpp build** — `prismaquant-llama` ships the canonical source under `src/pipeline/cpp/quantize-cost/`. Copy that directory into your llama.cpp tree's `tools/`, add `add_subdirectory(quantize-cost)` to `tools/CMakeLists.txt`, then `cmake --build build --target llama-quantize-cost`. See [`src/pipeline/cpp/quantize-cost/README.md`](../src/pipeline/cpp/quantize-cost/README.md) for the full recipe (it links against `ggml` + llama.cpp's quantization kernels, can't be built standalone).
 
-3. **Python 3.10+** and `pip` (or your package manager)
+3. **The `prismaquant` Python package** — Stage C (Hessian probe) shells out to `python3 -m prismaquant.incremental_probe`. Use **our fork** at [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant), which carries patches needed for Gemma-4 (iSWA + KV-sharing) and NemotronH (Mamba-2 hybrid) architectures that haven't been upstreamed yet. The upstream original at [`RobTand/prismaquant`](https://github.com/RobTand/prismaquant) (which RobTand designed and built — see methodology credit above) works for simpler architectures but will fail on those models.
 
-4. *(Optional)* **A custom calibration corpus** — a plain text file with diverse prose. **prismaquant-llama ships with a default corpus** (a copy of [bartowski-calibration-v3.txt](https://gist.github.com/bartowski1182/eb213dccb3571f863da82e99418f81e8) by **bartowski**, ~280 KB) so first runs work out of the box. Bring your own corpus only if you want one closer to your target deployment domain.
+   ```bash
+   pip install git+https://github.com/jimbothigpen/prismaquant.git
+   ```
 
-5. **Disk space**: roughly **2-2.5× the BF16 size** of your target model (HF safetensors cache ≈ BF16 + BF16 GGUF + the final PQ GGUF at 25-30% of BF16). For a 9B model that's ~40-45 GB peak. The format count in `--formats` doesn't materially change this — Stage E measures per-tensor MSE in memory and only writes a small `costs.csv`, never per-format GGUFs.
+   Stage C will give a clear "prismaquant package not installed" error if it's missing.
 
-6. **GPU** (recommended): supported by your llama.cpp build. CPU-only works but is much slower.
+4. **Python 3.10+** and `pip` (or your package manager)
+
+5. *(Optional)* **A custom calibration corpus** — a plain text file with diverse prose. **prismaquant-llama ships with a default corpus** (a copy of [bartowski-calibration-v3.txt](https://gist.github.com/bartowski1182/eb213dccb3571f863da82e99418f81e8) by **bartowski**, ~280 KB) so first runs work out of the box. Bring your own corpus only if you want one closer to your target deployment domain.
+
+6. **Disk space**: roughly **2-2.5× the BF16 size** of your target model (HF safetensors cache ≈ BF16 + BF16 GGUF + the final PQ GGUF at 25-30% of BF16). For a 9B model that's ~40-45 GB peak. The format count in `--formats` doesn't materially change this — Stage E measures per-tensor MSE in memory and only writes a small `costs.csv`, never per-format GGUFs.
+
+7. **GPU** (recommended): supported by your llama.cpp build. CPU-only works but is much slower.
 
 ### Picking the right HuggingFace model path
 
@@ -517,7 +525,9 @@ prismaquant-llama pipeline run \
 
 **"llama-quantize not found"** — pass `--binary /full/path/to/llama-quantize`. Or: `prismaquant-llama paths find-binaries` to see what was auto-discovered.
 
-**"llama-quantize-cost not found at <path>"** (Stage E fail) — `llama-quantize-cost` lives next to `llama-quantize` and isn't in mainline llama.cpp. Either point `--binary` at a fork that ships it (RobTand/prismaquant, frankenturbo2, etc.), or build the bundled source: copy `src/pipeline/cpp/quantize-cost/` from this repo into your llama.cpp fork's `tools/` tree, register it in `tools/CMakeLists.txt`, and rebuild. See prerequisite #2 + the README under that source dir for the recipe.
+**"llama-quantize-cost not found at <path>"** (Stage E fail) — `llama-quantize-cost` lives next to `llama-quantize` and isn't in mainline llama.cpp. Either point `--binary` at a build of [`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2) (which ships it), or build the canonical source: copy `src/pipeline/cpp/quantize-cost/` from this repo into your llama.cpp tree's `tools/`, register it in `tools/CMakeLists.txt`, and rebuild. See prerequisite #2 + the README under that source dir for the recipe.
+
+**"prismaquant package not installed"** (Stage C fail) — Stage C calls `python3 -m prismaquant.incremental_probe`. Install our fork: `pip install git+https://github.com/jimbothigpen/prismaquant.git` (carries Gemma-4 + NemotronH patches not yet upstreamed). The upstream original at `RobTand/prismaquant` works for simpler architectures.
 
 **"calibration corpus not found"** — should be rare since the package ships a default corpus. If you do see this, you've explicitly passed `--calibration <path>` (or set `[defaults] calibration_corpus` in `config.toml`) to a path that doesn't exist. Either fix the path or omit the flag entirely to use the bundled corpus.
 

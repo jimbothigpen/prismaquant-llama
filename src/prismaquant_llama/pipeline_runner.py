@@ -352,9 +352,10 @@ def stage_c_probe(cfg: PipelineConfig, paths: WorkPaths, hf_dir: Path) -> Path:
         raise SystemExit(
             f"FAIL: C prismaquant.incremental_probe exit={rc}\n"
             f"  Likely cause: prismaquant package not installed.\n"
-            f"  Install via: pip install --user --break-system-packages "
-            f"-e <prismaquant-source-dir>\n"
-            f"  Source: https://github.com/RobTand/prismaquant")
+            f"  Install our fork (carries Gemma-4 + NemotronH patches):\n"
+            f"    pip install git+https://github.com/jimbothigpen/prismaquant.git\n"
+            f"  Upstream (simpler architectures only): "
+            f"https://github.com/RobTand/prismaquant")
     _log(paths, "C", f"C. probe.pkl: {probe_path.stat().st_size/1024**2:.1f} MB")
     return probe_path
 
