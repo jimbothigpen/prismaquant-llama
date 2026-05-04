@@ -103,6 +103,74 @@ DEFAULT_CONFIG_DIR = PRISMAQUANT_LLAMA_ROOT / "config"
 DEFAULT_SCRATCH_ROOT = PRISMAQUANT_LLAMA_ROOT / "scratch"
 DEFAULT_SYSTEM_PERF_PATH = DEFAULT_CONFIG_DIR / "system-default-format-perf.json"
 DEFAULT_USER_FORMATS_PATH = DEFAULT_CONFIG_DIR / "default-formats.txt"
+DEFAULT_USER_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.toml"
+
+
+_user_config_cache: "Optional[dict]" = None
+
+
+def load_user_config() -> dict:
+    """Load user's config.toml from ~/.prismaquant-llama/config/config.toml.
+
+    Returns a parsed dict. If the file is missing, malformed, or empty,
+    returns an empty dict (callers should treat missing keys as "use
+    built-in default"). Cached after first call.
+
+    Schema sections (all optional):
+        [paths]              — output_root, hf_cache, scratch, calibration, etc.
+        [binaries]           — default_set + named binary sets
+        [defaults]           — budget_auto_ratio, priority, chunks_*, ctx, no_mmap, ...
+        [huggingface]        — default_revision, download_resume, ...
+        [wizard]             — setup_complete, auto_suggest_perf, disk_warn_pct, ...
+
+    Example file ships at examples/config.toml in the repo. Hand-editable.
+    Empty / missing file = "use all built-in defaults" (backward compatible).
+    """
+    global _user_config_cache
+    if _user_config_cache is not None:
+        return _user_config_cache
+    if not DEFAULT_USER_CONFIG_PATH.exists():
+        _user_config_cache = {}
+        return _user_config_cache
+    try:
+        import tomllib
+        with DEFAULT_USER_CONFIG_PATH.open("rb") as f:
+            _user_config_cache = tomllib.load(f)
+    except Exception as e:
+        # Don't crash the pipeline on a malformed user config; warn + ignore.
+        import sys as _sys
+        print(f"[paths] WARN: failed to parse {DEFAULT_USER_CONFIG_PATH}: {e}",
+              file=_sys.stderr)
+        _user_config_cache = {}
+    return _user_config_cache
+
+
+def get_user_config_value(section: str, key: str, default=None):
+    """Look up `[section] key` from the user config, returning `default`
+    if missing. Convenience wrapper around `load_user_config()`."""
+    cfg = load_user_config()
+    return cfg.get(section, {}).get(key, default)
+
+
+def get_user_default_path(role: str, fallback: Path) -> Path:
+    """Return user's [paths] entry for `role` if set, expanding ~ and
+    relative paths; otherwise return `fallback`. Roles: output_root,
+    hf_cache, binary_cache, scratch, calibration."""
+    val = get_user_config_value("paths", role)
+    if val is None:
+        return fallback
+    return Path(str(val)).expanduser()
+
+
+def get_user_default_binary_set() -> "Optional[dict]":
+    """Return the user's default binary set (`[binaries.<default_set>]`)
+    as a dict of tool→path, or None if not configured."""
+    cfg = load_user_config()
+    binaries = cfg.get("binaries", {})
+    default_name = binaries.get("default_set")
+    if not default_name:
+        return None
+    return binaries.get(default_name)
 
 
 def load_user_default_formats() -> "Optional[list[str]]":

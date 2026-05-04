@@ -778,31 +778,49 @@ def main(argv: Optional[list[str]] = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pr = sub.add_parser("run", help="run the full A→I pipeline")
+
+    # User-config-aware defaults: ~/.prismaquant-llama/config/config.toml overrides
+    # the hardcoded fallbacks below. CLI args still override the config file.
+    from .paths import get_user_config_value, get_user_default_path
+    _user_output_root = get_user_default_path("output_root", DEFAULT_OUTPUT_ROOT)
+    _user_budget_auto_ratio = get_user_config_value("defaults", "budget_auto_ratio", 0.25)
+    _user_budget_band_gb = get_user_config_value("defaults", "budget_band_gb", 0.25)
+    _user_priority = get_user_config_value("defaults", "priority", "333")
+    _user_chunks_imatrix = get_user_config_value("defaults", "chunks_imatrix", 200)
+    _user_chunks_eval = get_user_config_value("defaults", "chunks_eval", 100)
+    _user_ctx = get_user_config_value("defaults", "ctx", 4096)
+    _user_no_mmap_default = get_user_config_value("defaults", "no_mmap", False)
+    _user_calibration = get_user_config_value("defaults", "calibration_corpus", None)
+
     pr.add_argument("--hf-model", required=True,
                     help="HuggingFace model ID (e.g., google/gemma-4-E4B-it)")
     pr.add_argument("--hf-revision", default="main")
     pr.add_argument("--binary", type=Path, default=None,
-                    help="path to llama-quantize (default: auto-discover)")
-    pr.add_argument("--calibration", type=Path, required=True,
-                    help="calibration corpus text file (e.g., bartowski-calibration-v3.txt)")
-    pr.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT_ROOT)
+                    help="path to llama-quantize (default: auto-discover, then "
+                         "[binaries.<default_set>] from user config.toml)")
+    pr.add_argument("--calibration", type=Path,
+                    default=Path(_user_calibration).expanduser() if _user_calibration else None,
+                    required=(_user_calibration is None),
+                    help="calibration corpus text file (e.g., bartowski-calibration-v3.txt). "
+                         "Required unless [defaults] calibration_corpus is set in "
+                         "~/.prismaquant-llama/config/config.toml.")
+    pr.add_argument("--output", "-o", type=Path, default=_user_output_root)
     pr.add_argument("--budget-gb", type=float, default=None,
-                    help="target GGUF size in GB. Default: auto = 25%% of BF16 GGUF "
-                         "size (computed after Stage B). 25%% is slightly tighter "
-                         "than mainline IQ4_XS (~27-29%% real-world), trading a bit "
-                         "of size for the prismaquant per-tensor allocation win.")
-    pr.add_argument("--budget-auto-ratio", type=float, default=0.25,
+                    help="target GGUF size in GB. Default: auto = budget_auto_ratio "
+                         "of BF16 GGUF size (computed after Stage B).")
+    pr.add_argument("--budget-auto-ratio", type=float, default=_user_budget_auto_ratio,
                     help="when --budget-gb is unset, target this fraction of the "
-                         "BF16 GGUF size (default: 0.25)")
-    pr.add_argument("--budget-band-gb", type=float, default=0.25,
+                         "BF16 GGUF size (default from user config or 0.25)")
+    pr.add_argument("--budget-band-gb", type=float, default=_user_budget_band_gb,
                     help="allocator's wiggle room around --budget-gb (default: ±0.25 GB)")
-    pr.add_argument("--priority", default="333",
-                    help="3-digit XYZ — X=PPL, Y=TG, Z=PP (default: 333 = equal weight)")
+    pr.add_argument("--priority", default=_user_priority,
+                    help="3-digit XYZ — X=PPL, Y=TG, Z=PP (default from user config or 333)")
     pr.add_argument("--formats",
-                    help="comma-separated format whitelist (default: 11-format prismaquant default)")
-    pr.add_argument("--chunks-imatrix", type=int, default=200)
-    pr.add_argument("--chunks-eval", type=int, default=100)
-    pr.add_argument("--ctx", type=int, default=4096)
+                    help="comma-separated format whitelist (default: 11-format prismaquant default; "
+                         "user override via ~/.prismaquant-llama/config/default-formats.txt)")
+    pr.add_argument("--chunks-imatrix", type=int, default=_user_chunks_imatrix)
+    pr.add_argument("--chunks-eval", type=int, default=_user_chunks_eval)
+    pr.add_argument("--ctx", type=int, default=_user_ctx)
     pr.add_argument("--skip-eval", action="store_true",
                     help="skip stage I (PPL eval)")
     pr.add_argument("--convert-script", type=Path,
@@ -853,9 +871,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = p.parse_args(argv)
 
     if args.cmd == "run":
+        # Resolve binary: CLI → user-config binary set → auto-discover (handled later in pipeline)
+        resolved_binary = args.binary
+        if resolved_binary is None:
+            from .paths import get_user_default_binary_set
+            binset = get_user_default_binary_set()
+            if binset and binset.get("quantize"):
+                resolved_binary = Path(str(binset["quantize"])).expanduser()
+                print(f"[pipeline] using binary from user config: {resolved_binary}")
+
+        # Resolve use_mmap: CLI --mmap (store_true) wins; otherwise consult user config's
+        # `[defaults] no_mmap`. If no_mmap=true → use_mmap=False; else dataclass default.
+        resolved_use_mmap = args.use_mmap
+        if not resolved_use_mmap and _user_no_mmap_default:
+            resolved_use_mmap = False  # explicit user preference for --no-mmap behavior
+
         cfg_kwargs = dict(
             hf_model=args.hf_model, hf_revision=args.hf_revision,
-            binary=args.binary, calibration=args.calibration,
+            binary=resolved_binary, calibration=args.calibration,
             output_root=args.output,
             budget_gb=args.budget_gb, budget_band_gb=args.budget_band_gb,
             budget_auto_ratio=args.budget_auto_ratio,
@@ -869,7 +902,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             clean_shared=args.clean_shared or args.clean_all,
             clean_imatrix=args.clean_imatrix or args.clean_all,
             clean_probe=args.clean_probe or args.clean_all,
-            use_mmap=args.use_mmap,
+            use_mmap=resolved_use_mmap,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]

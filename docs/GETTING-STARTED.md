@@ -178,6 +178,36 @@ IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, IQ4_NL
 
 > 📝 **About `Q4_K_S` / `Q4_K_M` / `Q3_K_L` etc.** — these are *whole-model presets* of the regular `llama-quantize` CLI (e.g., `Q4_K_M` = "mostly Q4_K plus Q6_K for output"). They aren't separate ggml types. Per-tensor formats are the base types only: `Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K`. prismaquant *is itself* a per-tensor mixer — it does what `_S/_M/_L` presets do, but with allocator-driven tensor-level decisions instead of fixed pinning rules. So you'd never include `Q4_K_M` in `--formats` (it's redundant with prismaquant's job). `discover --all` shows the variants annotated as CLI-only.
 
+### Setting persistent preferences via `config.toml`
+
+For everything *other* than the formats list — paths, default budget ratio, default priority, default binary set, calibration corpus, mmap behavior — there's a unified TOML config at:
+
+```
+~/.prismaquant-llama/config/config.toml
+```
+
+The repo ships a fully-commented example you can use as a template:
+
+```bash
+mkdir -p ~/.prismaquant-llama/config
+cp examples/config.toml ~/.prismaquant-llama/config/config.toml
+# edit to taste
+```
+
+Sections:
+- `[paths]` — output_root, hf_cache, scratch, calibration dir
+- `[binaries]` — register one or more binary sets (mainline / fork / etc.) and pick a default
+- `[defaults]` — budget_auto_ratio, priority, chunks_imatrix, chunks_eval, ctx, no_mmap, calibration_corpus
+- `[huggingface]` — default_revision, download_resume
+- `[wizard]` — setup_complete, auto_suggest_perf, disk_warn_pct
+
+When set, the values fill in the argparse defaults, so:
+- `--calibration` becomes optional (uses `[defaults] calibration_corpus`)
+- `--binary` becomes optional (uses `[binaries.<default_set>]`)
+- `--budget-auto-ratio`, `--priority`, etc. default to your preferences
+
+CLI args always win over `config.toml`. Missing keys fall through to built-in defaults.
+
 ### Setting your own default formats list (per-user config)
 
 Tired of typing `--formats X,Y,Z` on every command? Drop a file at:
