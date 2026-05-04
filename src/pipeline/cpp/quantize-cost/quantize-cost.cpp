@@ -63,6 +63,7 @@ static const type_entry KNOWN_TYPES[] = {
     {GGML_TYPE_IQ4_KT,  "IQ4_KT"},
     {GGML_TYPE_IQ4_XS,  "IQ4_XS"},
     {GGML_TYPE_IQ4_NL,  "IQ4_NL"},
+    {GGML_TYPE_IQ2_S,   "IQ2_S"},
     {GGML_TYPE_IQ2_XS,  "IQ2_XS"},
     {GGML_TYPE_IQ2_XXS, "IQ2_XXS"},
     {GGML_TYPE_IQ3_S,   "IQ3_S"},
