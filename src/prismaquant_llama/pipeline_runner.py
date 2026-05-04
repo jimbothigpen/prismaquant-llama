@@ -125,11 +125,11 @@ class PipelineConfig:
         # Auto-locate bundled pipeline scripts (allocator.py, bridge_probe_to_gguf.py)
         if self.pipeline_scripts_dir is None:
             self.pipeline_scripts_dir = Path(__file__).parents[1] / "pipeline" / "scripts"
-        # Auto HSA override for non-native arches (gfx1102/gfx1103 → emulate gfx1100)
-        if self.hsa_override is None:
-            host = os.environ.get("HOSTNAME") or os.uname().nodename
-            if host in ("ai01",):  # extend per fleet
-                self.hsa_override = "11.0.2"
+        # Auto HSA override for non-native arches (gfx1102/gfx1103 → emulate gfx1100).
+        # Override applied via $HSA_OVERRIDE_GFX_VERSION env var on subprocess calls.
+        # Set explicitly via --hsa-override or [defaults] hsa_override in config.toml
+        # if your hardware needs it; auto-detection is intentionally not hostname-based
+        # since hostname conventions vary across fleets.
         # Auto-discover format-perf file: prefers binary-sha-keyed cache from a
         # `calibrate deep` run on this exact binary, falls back to the static
         # examples/format-perf-<arch>.json by hostname match. The cache provides

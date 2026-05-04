@@ -299,7 +299,7 @@ def discover_formats(
             return _filter(cached, all_formats=all_formats)
 
     # Run --help and parse. Inject LD_LIBRARY_PATH for binaries that depend
-    # on libllama.so installed alongside (e.g., /path/to/llama.cpp/build/bin + /opt/llama/lib).
+    # on libllama.so installed alongside (e.g., <prefix>/bin + <prefix>/lib).
     env = dict(os.environ)
     bin_dir = binary_path.parent
     candidate_lib_dirs = [bin_dir, bin_dir.parent / "lib", bin_dir]  # try sibling-bin, ../lib, then bin again

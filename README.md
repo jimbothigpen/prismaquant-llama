@@ -330,7 +330,7 @@ prismaquant-llama pipeline run \
 | **Format auto-discovery** | Parses `<binary> --help` to learn what formats your fork supports. Heuristic-classifies unknown formats (bpw/family/source) so any fork works without metadata files. Curated `format_metadata_base.json` (ships) covers mainline; forks can drop in `format_metadata_<forkname>.json` for polish. |
 | **Convention-path metadata loading** | Forks place metadata at `<binary>/../../tools/prismaquant/format_metadata_*.json` and we pick it up automatically. Works for `frankenturbo2` reference fork. |
 | **Shared BF16 + imatrix caches** | First run pays the convert + imatrix cost; subsequent runs (different budgets/priorities, same model) skip straight to allocate + quantize. ~10-30 min saved per re-run. |
-| **Per-host HSA override** | Auto-applies `HSA_OVERRIDE_GFX_VERSION=11.0.2` on hostnames that need it (currently `ai01`-pattern; extend per fleet). Avoids manual env wrapping. |
+| **HSA override hook** | Pass `--hsa-override 11.0.2` (or set `[defaults] hsa_override` in `config.toml`) to apply `HSA_OVERRIDE_GFX_VERSION` to all subprocess GPU calls. Useful for emulating gfx1100 on gfx1102/gfx1103. |
 | **Per-stage logs** | `<work>/logs/stage-{A..I}.log` for each run. Pipeline failure points to the right log file in the error message. |
 | **Standalone subcommands** | `discover`, `calibrate quick/deep/ingest`, `paths layout/find-binaries`, `wizard` for users who only want one piece of the workflow. |
 

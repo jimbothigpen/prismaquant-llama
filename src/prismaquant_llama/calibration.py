@@ -26,9 +26,8 @@ Resume-safe: if the output file already has a format's data, that
 format is skipped on rerun. Disk-safe: each format's quantized output is
 deleted immediately after measurement (peak disk = 1× output, not Nx).
 
-Status: SCAFFOLD. Subprocess invocations + parser logic implemented; not
-yet tested end-to-end against a live binary because that consumes the
-GPU which is currently running the comparison sweep on ai00.
+Status: SCAFFOLD. Subprocess invocations + parser logic implemented; full
+end-to-end testing pending against a live binary.
 """
 
 from __future__ import annotations
