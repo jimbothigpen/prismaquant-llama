@@ -35,15 +35,29 @@ Result: a mixed-format GGUF that's typically 5-15% smaller than a uniform K-quan
 
 You need:
 
-1. **A llama.cpp binary set** with `llama-quantize`, `llama-imatrix`, `llama-perplexity`, `llama-bench`. Any modern fork works (mainline, ik_llama, frankenturbo2, etc.). Build them once and put them somewhere on disk.
+1. **A llama.cpp binary set** with `llama-quantize`, `llama-imatrix`, `llama-perplexity`, `llama-bench`. Any modern fork works (mainline, ik_llama, frankenturbo2, etc.). Build them once and put them on disk. **For zero-config runs, make sure these binaries are on `$PATH`** (the tool will find them automatically); otherwise pass `--binary` explicitly.
 
 2. **Python 3.10+** and `pip` (or your package manager)
 
-3. **A calibration corpus** — a plain text file with diverse prose. The recommended starter is [bartowski-calibration-v3.txt](https://gist.github.com/bartowski1182/eb213dccb3571f863da82e99418f81e8) — download once and reuse.
+3. *(Optional)* **A custom calibration corpus** — a plain text file with diverse prose. **prismaquant-llama ships with a default corpus** (a copy of [bartowski-calibration-v3.txt](https://gist.github.com/bartowski1182/eb213dccb3571f863da82e99418f81e8) by **bartowski**, ~280 KB, public-domain text from Wikipedia / public code / etc.) so first runs work out of the box. Bring your own corpus only if you want one closer to your target deployment domain.
 
 4. **Disk space**: ~3× the BF16 size of your target model (for HF cache + BF16 GGUF + intermediate work). For a 9B model that's ~50 GB.
 
 5. **GPU** (recommended): supported by your llama.cpp build. CPU-only works but is much slower.
+
+### Picking the right HuggingFace model path
+
+`--hf-model` takes a HuggingFace **safetensors** model repo ID — the same string you'd plug into `from_pretrained()`. A few rules:
+
+- **Must be safetensors** (i.e., the repo contains `model.safetensors` / `model-00001-of-N.safetensors` files). prismaquant-llama runs Stage B convert-hf-to-gguf itself; it does not consume third-party GGUFs.
+- **Do NOT pass a GGUF-only repo** (e.g., `unsloth/gemma-3-4b-it-GGUF`, `bartowski/Llama-3-8B-Instruct-GGUF`, anything with `-GGUF` in the name). These have nothing for the convert step to chew on. Pick the *base* repo instead.
+- **Most HF model cards link to the right repo.** On the HF page, look for "Files and versions" — if you see `.safetensors` files, it's the right one. If you see only `.gguf`, scroll to "Use this model" or check the model card for a link to the un-quantized base.
+- **Quick examples**:
+  - ✅ `unsloth/gemma-3-4b-it` (safetensors)
+  - ✅ `meta-llama/Llama-3.2-1B-Instruct` (safetensors, gated — accept license first)
+  - ❌ `unsloth/gemma-3-4b-it-GGUF` (already-quantized GGUF — convert step has nothing to do)
+  - ❌ `bartowski/gemma-3-4b-it-GGUF` (same — quantized output, not source)
+- **Gated models** (Llama, Gemma, etc.): `huggingface-cli login` once, accept the license on the model card in your browser, then prismaquant-llama can download it.
 
 ---
 
@@ -72,24 +86,34 @@ The second command auto-discovers llama.cpp tools on common paths. If yours aren
 
 Pick a small model for your first run. Recommended: `unsloth/gemma-3-4b-it` (downloads ~10 GB, full pipeline takes ~15 min on a modern GPU).
 
+**The minimal first-run command is one flag:**
+
+```bash
+prismaquant-llama pipeline run --hf-model unsloth/gemma-3-4b-it
+```
+
+That's it. This works out of the box on most setups, with no config files and no other flags. Defaults that apply:
+
+| Default | Value |
+|---|---|
+| `--binary` | auto-discovered via `$PATH` (and a few common build-dir locations) |
+| `--calibration` | bundled corpus shipped with the package (bartowski-v3, ~280 KB) |
+| `--output` | `~/.prismaquant-llama/builds/<model-name>-prismaquant/` (auto-created) |
+| `--budget-gb` | 25% of the BF16 GGUF size |
+| `--priority` | `333` (equal weight: PPL/TG/PP) |
+| `--formats` | mainline llama.cpp set (Q2_K through Q8_0 + IQ2_S/IQ3_XXS/IQ3_S/IQ4_XS/IQ4_NL) |
+
+**Every default is overrideable on the CLI** — pass `--binary`, `--calibration`, `--output`, `--budget-gb`, `--priority`, `--formats` at any time and the flag wins over the default. For example, to set everything explicitly:
+
 ```bash
 prismaquant-llama pipeline run \
     --hf-model unsloth/gemma-3-4b-it \
     --binary /path/to/your/llama-quantize \
-    --calibration /path/to/bartowski-calibration-v3.txt \
+    --calibration /path/to/your-domain-corpus.txt \
     --output ~/quants/gemma-3-4b-it-prismaquant
 ```
 
-> 💡 **Of the four flags above, only `--hf-model` and `--calibration` are strictly required.**
-> - `--binary` is auto-discovered via `$PATH` if omitted (falls through `find_binary("quantize")`).
-> - `--output` defaults to `~/.prismaquant-llama/builds/<model-name>-prismaquant/` if omitted (per-model subdir auto-derived from `--hf-model`).
-> - `--calibration` becomes optional once you set `[defaults] calibration_corpus` in `~/.prismaquant-llama/config/config.toml` (see [Setting persistent preferences via `config.toml`](#setting-persistent-preferences-via-configtoml) below).
->
-> After config.toml setup, the minimum command shrinks all the way to:
-> ```bash
-> prismaquant-llama pipeline run --hf-model unsloth/gemma-3-4b-it
-> ```
-> All other flags (priority, budget, formats, etc.) also have built-in defaults you can override per-run on the CLI.
+For persistent overrides (so you don't pass them every run), see [Setting persistent preferences via `config.toml`](#setting-persistent-preferences-via-configtoml) below.
 
 This will:
 
@@ -221,11 +245,12 @@ Sections:
 - `[wizard]` — setup_complete, auto_suggest_perf, disk_warn_pct
 
 When set, the values fill in the argparse defaults, so:
-- `--calibration` becomes optional (uses `[defaults] calibration_corpus`)
-- `--binary` becomes optional (uses `[binaries.<default_set>]`)
-- `--budget-auto-ratio`, `--priority`, etc. default to your preferences
+- `--binary` resolves from `[binaries.<default_set>]` (otherwise auto-discovers via `$PATH`)
+- `--calibration` resolves from `[defaults] calibration_corpus` (otherwise the bundled bartowski-v3 corpus)
+- `--output` resolves from `[paths] output_root` (otherwise `~/.prismaquant-llama/builds/`)
+- `--budget-auto-ratio`, `--priority`, `--chunks-imatrix`, `--chunks-eval`, `--ctx`, `--no-mmap` all pick up your preferences
 
-CLI args always win over `config.toml`. Missing keys fall through to built-in defaults.
+CLI args always win over `config.toml`. Missing keys fall through to built-in defaults — the tool always has a working fallback.
 
 ### Setting your own default formats list (per-user config)
 
@@ -463,9 +488,9 @@ CLI args always win over these files. Missing keys/files fall through to built-i
 
 ```bash
 prismaquant-llama pipeline run \
-    --hf-model HF_ID                         # required
+    --hf-model HF_ID                         # required (safetensors repo, NOT a -GGUF repo)
     --binary PATH                            # optional; auto-discovers via $PATH (use [binaries.<default_set>] in config.toml to pin a specific build)
-    --calibration PATH                       # required unless [defaults] calibration_corpus in config.toml
+    --calibration PATH                       # optional; falls through CLI > [defaults] calibration_corpus > bundled bartowski-v3 corpus
     --output, -o DIR                         # optional; defaults to ~/.prismaquant-llama/builds/, override via [paths] output_root in config.toml. Per-model subdir auto-derived from --hf-model.
     --budget-gb FLOAT                        # exact target size
     --budget-auto-ratio 0.25                 # alternative: fraction of BF16
@@ -487,7 +512,9 @@ prismaquant-llama pipeline run \
 
 **"llama-quantize not found"** — pass `--binary /full/path/to/llama-quantize`. Or: `prismaquant-llama paths find-binaries` to see what was auto-discovered.
 
-**"calibration corpus not found"** — download bartowski-calibration-v3.txt or any other calibration corpus from public sources. Path must exist and be a plain text file.
+**"calibration corpus not found"** — should be rare since the package ships a default corpus. If you do see this, you've explicitly passed `--calibration <path>` (or set `[defaults] calibration_corpus` in `config.toml`) to a path that doesn't exist. Either fix the path or omit the flag entirely to use the bundled corpus.
+
+**Wrong-shape HF model error during Stage B (convert step)** — usually means `--hf-model` points to a GGUF-only repo (anything with `-GGUF` in the name like `unsloth/gemma-3-4b-it-GGUF`). prismaquant-llama needs the *safetensors* base repo, not pre-quantized GGUFs. Find the un-quantized base repo (usually linked from the GGUF model card) and pass that instead. See [Picking the right HuggingFace model path](#picking-the-right-huggingface-model-path) above.
 
 **Stage I crashes / "ROCm error: unspecified launch failure"** — your hardware/driver has an issue with the model's specific architecture (commonly hybrid-attention models on AMD RDNA3 iGPUs). Pass `--skip-eval` to skip the eval step. The GGUF will still be produced.
 

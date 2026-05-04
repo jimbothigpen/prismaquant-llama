@@ -50,4 +50,4 @@ Documentation = "https://github.com/jimbothigpen/prismaquant-llama#readme"
 where = ["src"]
 
 [tool.setuptools.package-data]
-prismaquant_llama = ["format_metadata_base.json"]
+prismaquant_llama = ["format_metadata_base.json", "data/*.txt"]

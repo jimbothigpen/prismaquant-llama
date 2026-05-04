@@ -781,7 +781,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # User-config-aware defaults: ~/.prismaquant-llama/config/config.toml overrides
     # the hardcoded fallbacks below. CLI args still override the config file.
-    from .paths import get_user_config_value, get_user_default_path
+    from .paths import (get_user_config_value, get_user_default_path,
+                        get_packaged_calibration_corpus)
     _user_output_root = get_user_default_path("output_root", DEFAULT_OUTPUT_ROOT)
     _user_budget_auto_ratio = get_user_config_value("defaults", "budget_auto_ratio", 0.25)
     _user_budget_band_gb = get_user_config_value("defaults", "budget_band_gb", 0.25)
@@ -791,6 +792,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     _user_ctx = get_user_config_value("defaults", "ctx", 4096)
     _user_no_mmap_default = get_user_config_value("defaults", "no_mmap", False)
     _user_calibration = get_user_config_value("defaults", "calibration_corpus", None)
+    # Calibration fall-through: user CLI > user config > package-shipped default
+    _calibration_default = (
+        Path(_user_calibration).expanduser() if _user_calibration
+        else get_packaged_calibration_corpus()
+    )
 
     pr.add_argument("--hf-model", required=True,
                     help="HuggingFace model ID (e.g., google/gemma-4-E4B-it)")
@@ -799,11 +805,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="path to llama-quantize (default: auto-discover, then "
                          "[binaries.<default_set>] from user config.toml)")
     pr.add_argument("--calibration", type=Path,
-                    default=Path(_user_calibration).expanduser() if _user_calibration else None,
-                    required=(_user_calibration is None),
-                    help="calibration corpus text file (e.g., bartowski-calibration-v3.txt). "
-                         "Required unless [defaults] calibration_corpus is set in "
-                         "~/.prismaquant-llama/config/config.toml.")
+                    default=_calibration_default,
+                    required=(_calibration_default is None),
+                    help="calibration corpus text file. Resolution order: this "
+                         "flag > [defaults] calibration_corpus in config.toml > "
+                         "package-shipped default (~280 KB compiled from public "
+                         "text). For best results on production runs, supply a "
+                         "corpus closer to your target deployment domain.")
     pr.add_argument("--output", "-o", type=Path, default=_user_output_root)
     pr.add_argument("--budget-gb", type=float, default=None,
                     help="target GGUF size in GB. Default: auto = budget_auto_ratio "

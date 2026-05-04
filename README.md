@@ -93,11 +93,17 @@ matches the `--binary` directory).
 > stage-by-stage timing table.
 
 ```bash
-# Recommended: full pipeline, auto-budget (25% × BF16), equal-priority
+# Minimum invocation — works out of the box on any host with llama-quantize
+# on $PATH. Uses bundled calibration corpus (bartowski-v3) and writes to
+# ~/.prismaquant-llama/builds/<model>-prismaquant/.
+prismaquant-llama pipeline run --hf-model unsloth/gemma-3-4b-it
+
+# Recommended: full pipeline, all overrides explicit, auto-budget (25% × BF16),
+# equal-priority. Pass --hf-model with a SAFETENSORS repo (NOT a -GGUF repo).
 prismaquant-llama pipeline run \
     --hf-model google/gemma-4-E4B-it \
     --binary /path/to/your-fork/build/bin/llama-quantize \
-    --calibration /path/to/wikitext-or-bartowski.txt \
+    --calibration /path/to/your-domain-corpus.txt \
     --output ~/prismaquant-builds
 
 # Same model, explicit budget + PPL-heavy priority

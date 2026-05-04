@@ -105,6 +105,26 @@ DEFAULT_SYSTEM_PERF_PATH = DEFAULT_CONFIG_DIR / "system-default-format-perf.json
 DEFAULT_USER_FORMATS_PATH = DEFAULT_CONFIG_DIR / "default-formats.txt"
 DEFAULT_USER_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.toml"
 
+# Package-shipped fallback calibration corpus. Used when the user hasn't
+# provided --calibration on the CLI or [defaults] calibration_corpus in
+# config.toml. This is a verbatim copy of bartowski-calibration-v3.txt
+# (~280 KB) — public compilation by bartowski, widely used as the
+# de-facto starter calibration corpus across the GGUF community.
+# Source: https://gist.github.com/bartowski1182/eb213dccb3571f863da82e99418f81e8
+# Adequate for first-run smoke tests and many production uses; for best
+# results, calibrate with a corpus closer to your target deployment domain.
+PACKAGED_CALIBRATION_CORPUS = (
+    Path(__file__).parent / "data" / "calibration-corpus-default.txt"
+)
+
+
+def get_packaged_calibration_corpus() -> "Optional[Path]":
+    """Return path to the package-shipped calibration corpus, or None if
+    the package is installed in a way that didn't include the data file."""
+    if PACKAGED_CALIBRATION_CORPUS.exists() and PACKAGED_CALIBRATION_CORPUS.stat().st_size > 0:
+        return PACKAGED_CALIBRATION_CORPUS
+    return None
+
 
 _user_config_cache: "Optional[dict]" = None
 
