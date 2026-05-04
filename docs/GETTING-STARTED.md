@@ -12,6 +12,14 @@ A hands-on walkthrough for first-time users. By the end, you'll have:
 
 ## What prismaquant-llama actually does
 
+> **Credit**: the per-tensor mixed-precision allocation methodology (the Bayesian
+> closed-form Δloss surrogate `0.5 · H_trace · MSE`, the probe → cost → allocate
+> pipeline shape) was designed by [**RobTand**](https://github.com/RobTand/prismaquant)
+> for [the original `prismaquant`](https://github.com/RobTand/prismaquant) project
+> (vLLM / compressed-tensors). prismaquant-llama is an adaptation that brings
+> that methodology to llama.cpp / GGUF — the math + design are RobTand's; this
+> repo is the llama.cpp-side plumbing.
+
 Most quantizers (mainline llama.cpp, etc.) pick a single format like `Q4_K_M` and apply it to every tensor. prismaquant-llama instead picks a **different format for each individual tensor** based on:
 
 1. How much each tensor "matters" (Fisher information from a probe pass)
