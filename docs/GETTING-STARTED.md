@@ -356,7 +356,7 @@ The `--set-as-system-default` flag installs the result as your fallback for all 
 
 ### Bench-only mode (`--skip-ppl`)
 
-Some hardware can't reliably run perplexity (e.g. specific HIP bugs on RDNA3 iGPUs) but can run bench fine. Use `--skip-ppl` to record only pp/tg numbers:
+If your hardware can run bench but not perplexity reliably, use `--skip-ppl` to record only pp/tg numbers:
 
 ```bash
 prismaquant-llama calibrate deep \
@@ -366,7 +366,7 @@ prismaquant-llama calibrate deep \
     ... etc
 ```
 
-The output perf file has `null` ppl/Δ fields. Pair with a separate PPL-only run on a working host (e.g., a server with stable ROCm) and merge the two files (PPL from server + pp/tg from your local machine) to get a complete cross-machine perf file.
+The output perf file has `null` ppl/Δ fields. Pair with a separate PPL-only run on a working host and merge the two files (PPL from one machine + pp/tg from another) to get a complete cross-machine perf file.
 
 ### Where calibration data lives
 
@@ -516,7 +516,7 @@ prismaquant-llama pipeline run \
 
 **Wrong-shape HF model error during Stage B (convert step)** — usually means `--hf-model` points to a GGUF-only repo (anything with `-GGUF` in the name like `unsloth/gemma-3-4b-it-GGUF`). prismaquant-llama needs the *safetensors* base repo, not pre-quantized GGUFs. Find the un-quantized base repo (usually linked from the GGUF model card) and pass that instead. See [Picking the right HuggingFace model path](#picking-the-right-huggingface-model-path) above.
 
-**Stage I crashes / "ROCm error: unspecified launch failure"** — your hardware/driver has an issue with the model's specific architecture (commonly hybrid-attention models on AMD RDNA3 iGPUs). Pass `--skip-eval` to skip the eval step. The GGUF will still be produced.
+**Stage I crashes inside the GPU backend** — if your hardware/driver has trouble running perplexity on the produced GGUF (architecture-specific kernel issues etc.), pass `--skip-eval` to skip Stage I. The GGUF itself still gets produced cleanly by Stage H — you can run `llama-perplexity` separately later, or on a different host.
 
 **OOM during Stage E (cost measurement) on a large model** — currently Stage E loads one tensor at a time, but very wide tensors (>2 GB) can spike. For now, the workaround is to run on a host with more RAM.
 
