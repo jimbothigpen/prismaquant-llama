@@ -111,6 +111,18 @@ class PipelineConfig:
     # whatever the page cache allows. Slower (cephfs/disk-bound) but bounded.
     use_mmap: bool = False
 
+    # Per-tensor minimum bpw floor. Forbids low-precision quants on tensors
+    # matching given regex patterns. Two knobs:
+    #   attention_floor_bpw: simple knob — sets min bpw for attention tensors
+    #     (q/k/v/qkv/gate/output projection weights). Default 4.0 excludes
+    #     2/3-bit quants which are known to compound errors cross-token via
+    #     QK^T affinities. Set to 0 to disable.
+    #   floor_bpw: advanced — additional {pattern: min_bpw} rules merged with
+    #     the attention default. Highest min_bpw per tensor wins.
+    # The allocator fails loudly if a rule removes all candidates for a tensor.
+    attention_floor_bpw: float = 4.0
+    floor_bpw: Optional[dict] = None
+
     def __post_init__(self):
         if self.binary is None:
             self.binary = find_binary("quantize")
@@ -510,6 +522,16 @@ def stage_g_allocate(cfg: PipelineConfig, paths: WorkPaths,
     if cfg.format_perf_file is not None and cfg.format_perf_file.exists():
         cmd += ["--tps", str(cfg.format_perf_file)]
         _log(paths, "G", f"G. multi-objective TPS data: {cfg.format_perf_file}")
+    # Build per-tensor floor-bpw rules: attention default + user advanced rules.
+    floor_rules = dict(cfg.floor_bpw or {})
+    if cfg.attention_floor_bpw and cfg.attention_floor_bpw > 0:
+        floor_rules.setdefault(
+            r"^blk\..*\.attn_(q|k|v|qkv|gate|output)\.weight$",
+            cfg.attention_floor_bpw,
+        )
+    if floor_rules:
+        cmd += ["--floor-bpw", json.dumps(floor_rules)]
+        _log(paths, "G", f"G. floor-bpw rules: {floor_rules}")
     rc = _run(cmd, paths.logs_dir / "stage-G.log")
     if rc != 0 or not recipe_path.exists():
         raise SystemExit(f"FAIL: G allocator exit={rc}")
@@ -868,6 +890,20 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "models on 31 GB hosts) — without this, llama-imatrix "
                          "hits OOM during model load. Trade-off: slower I/O-bound "
                          "stages (cephfs/disk paging) but bounded host RAM.")
+    pr.add_argument("--attention-floor-bpw", type=float, default=4.0,
+                    help="Minimum bits-per-weight for attention tensors "
+                         "(q/k/v/qkv/gate/output projections). Default 4.0 "
+                         "forbids 2/3-bit quants on attention because attention "
+                         "errors compound cross-token via QK^T affinities and "
+                         "have outsized PPL impact. Mirrors established K-quant "
+                         "practice (Q4_K_M keeps attn_v at Q6_K, etc.). Set to "
+                         "0 to disable and let the allocator pick freely.")
+    pr.add_argument("--floor-bpw", default=None,
+                    help="Advanced: JSON dict of additional {regex_pattern: "
+                         "min_bpw_float} rules, merged with the attention "
+                         "default. Multiple rules may match a tensor; highest "
+                         "min_bpw wins. Example: '{\"^blk\\\\.\\\\d+\\\\.ffn_down_exps\\\\.weight$\": 3.0}' "
+                         "to enforce min 3 bpw on FFN down-experts.")
     pr.add_argument("--clean-all", action="store_true",
                     help="shorthand for --clean-shared --clean-imatrix --clean-probe. "
                          "After Stage H success, removes every per-model intermediate; "
@@ -912,6 +948,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             clean_imatrix=args.clean_imatrix or args.clean_all,
             clean_probe=args.clean_probe or args.clean_all,
             use_mmap=resolved_use_mmap,
+            attention_floor_bpw=args.attention_floor_bpw,
+            floor_bpw=json.loads(args.floor_bpw) if args.floor_bpw else None,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]

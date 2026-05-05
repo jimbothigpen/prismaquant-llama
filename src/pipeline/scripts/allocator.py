@@ -24,6 +24,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import struct
 import sys
 from collections import defaultdict
@@ -469,6 +470,13 @@ def main():
                     help="Comma-separated list of budgets (GB) to sweep for Pareto curve")
     ap.add_argument("--allow-types", default=None,
                     help="Comma-separated whitelist of formats; empty=all in costs")
+    ap.add_argument("--floor-bpw", default=None,
+                    help="JSON dict {regex_pattern: min_bpw_float}. For each tensor "
+                         "matching the pattern, candidate formats with bpw < min_bpw "
+                         "are removed. Multiple patterns may match a tensor; the "
+                         "most restrictive (highest min_bpw) wins. Example: "
+                         "'{\"^blk\\\\..*\\\\.attn_(q|k|v|qkv|gate|output)\\\\.weight$\": 4.0}' "
+                         "forbids 2/3-bit quants on attention tensors.")
     ap.add_argument("--gguf", default=None,
                     help="Path to BF16 GGUF; required if --propagate-from-exemplars")
     ap.add_argument("--propagate-from-exemplars", action="store_true",
@@ -535,6 +543,38 @@ def main():
                 del costs[t]
         print(f"[allocator] filtered to formats: {sorted(allow)}", flush=True)
         print(f"[allocator] tensors after filter: {len(costs)}", flush=True)
+
+    # Per-tensor minimum-bpw filter (e.g. forbid 2/3-bit quants on attention).
+    # Multiple patterns may match a tensor; the highest min_bpw wins (most
+    # restrictive). costs entry tuple is (mse, size_bytes, n_elements, bpw).
+    if args.floor_bpw:
+        floor_rules = json.loads(args.floor_bpw)
+        compiled_rules = [(re.compile(pat), float(min_bpw))
+                          for pat, min_bpw in floor_rules.items()]
+        n_options_removed = 0
+        n_tensors_affected = 0
+        for t, fmts in list(costs.items()):
+            applicable_min = None
+            for pat, min_bpw in compiled_rules:
+                if pat.search(t) and (applicable_min is None or min_bpw > applicable_min):
+                    applicable_min = min_bpw
+            if applicable_min is None:
+                continue
+            before = len(fmts)
+            kept = {f: v for f, v in fmts.items() if v[3] >= applicable_min}
+            if not kept:
+                raise SystemExit(
+                    f"[allocator] floor-bpw rule (min={applicable_min}) removed all "
+                    f"candidate formats for tensor {t!r} (had {sorted(fmts)}). "
+                    f"Lower the floor or widen --formats to include higher-bpw types."
+                )
+            costs[t] = kept
+            if before != len(kept):
+                n_options_removed += (before - len(kept))
+                n_tensors_affected += 1
+        print(f"[allocator] floor-bpw: removed {n_options_removed} format-options "
+              f"across {n_tensors_affected} tensors "
+              f"(rules: {sorted(floor_rules.items())})", flush=True)
 
     # Pinned
     pinned = {}
