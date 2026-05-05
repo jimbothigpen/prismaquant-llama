@@ -123,6 +123,16 @@ class PipelineConfig:
     attention_floor_bpw: float = 4.0
     floor_bpw: Optional[dict] = None
 
+    # Reuse a previous run's costs.csv to skip Stage E (the per-(tensor,format)
+    # MSE measurement, which can take hours on large models). costs.csv is
+    # deterministic given identical (BF16, imatrix, formats list, exemplar
+    # layers, quantize-cost binary) — so reuse is safe across runs that vary
+    # only the allocator inputs (budget, priority, floor-bpw, etc.). When set,
+    # the file is copied into the new run's costs/ dir before Stage E runs and
+    # the existing cache check picks it up. No fingerprinting — caller's job
+    # to ensure the cache matches the run's inputs.
+    costs_cache: Optional[Path] = None
+
     def __post_init__(self):
         if self.binary is None:
             self.binary = find_binary("quantize")
@@ -420,6 +430,18 @@ def stage_d_imatrix(cfg: PipelineConfig, paths: WorkPaths, bf16_path: Path) -> P
 def stage_e_costs(cfg: PipelineConfig, paths: WorkPaths,
                   bf16_path: Path, imatrix_path: Path) -> Path:
     costs_path = paths.costs_dir / "costs.csv"
+    # Pre-seed costs.csv from a user-supplied cache if requested. costs.csv is
+    # deterministic given (BF16 GGUF, imatrix, formats list, exemplar layers,
+    # quantize-cost binary version), so reusing it across runs that share those
+    # inputs is safe and saves the hours-long Stage E measurement on big models.
+    # The user is responsible for ensuring the cache matches; we don't fingerprint.
+    if cfg.costs_cache is not None and not costs_path.exists():
+        cache_path = Path(cfg.costs_cache).expanduser().resolve()
+        if not cache_path.exists():
+            raise SystemExit(f"ERROR: --costs-cache path not found: {cache_path}")
+        costs_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cache_path, costs_path)
+        _log(paths, "E", f"E. costs.csv seeded from --costs-cache {cache_path}")
     if costs_path.exists():
         _log(paths, "E", f"E. costs.csv cached at {costs_path} (skip)")
         return costs_path
@@ -904,6 +926,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "default. Multiple rules may match a tensor; highest "
                          "min_bpw wins. Example: '{\"^blk\\\\.\\\\d+\\\\.ffn_down_exps\\\\.weight$\": 3.0}' "
                          "to enforce min 3 bpw on FFN down-experts.")
+    pr.add_argument("--costs-cache", type=Path, default=None,
+                    help="Path to a previous run's costs.csv to reuse, skipping "
+                         "Stage E. The file is copied into the new run's costs/ "
+                         "dir before Stage E runs. costs.csv is deterministic "
+                         "given (BF16 GGUF, imatrix, formats list, exemplar "
+                         "layers, quantize-cost binary), so reuse is safe across "
+                         "runs that vary only allocator inputs (budget, priority, "
+                         "floor-bpw). No fingerprinting performed — caller's "
+                         "responsibility to ensure the cache matches the run.")
     pr.add_argument("--clean-all", action="store_true",
                     help="shorthand for --clean-shared --clean-imatrix --clean-probe. "
                          "After Stage H success, removes every per-model intermediate; "
@@ -950,6 +981,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             use_mmap=resolved_use_mmap,
             attention_floor_bpw=args.attention_floor_bpw,
             floor_bpw=json.loads(args.floor_bpw) if args.floor_bpw else None,
+            costs_cache=args.costs_cache,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]
