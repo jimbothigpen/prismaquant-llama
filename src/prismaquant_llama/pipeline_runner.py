@@ -133,6 +133,18 @@ class PipelineConfig:
     # to ensure the cache matches the run's inputs.
     costs_cache: Optional[Path] = None
 
+    # Budget as percentage of BF16 GGUF size, used for output naming
+    # (e.g. PQ20-333.gguf for 20% budget). Computed at Stage B from the user's
+    # --budget-auto-ratio (preferred) or --budget-gb / bf16_gb (fallback).
+    # None until Stage B fills it in.
+    budget_pct: Optional[float] = None
+
+    # Optional suffix appended to the auto-generated output GGUF basename.
+    # Default basename is `<safe_hf_model>-PQ<budget_pct>-<priority>`; with
+    # output_suffix="mytest" it becomes `<safe_hf_model>-PQ<budget_pct>-<priority>-mytest`.
+    # Useful for tagging experimental runs (e.g. with different floor-bpw, formats list).
+    output_suffix: Optional[str] = None
+
     def __post_init__(self):
         if self.binary is None:
             self.binary = find_binary("quantize")
@@ -517,7 +529,9 @@ def stage_f_bridge(cfg: PipelineConfig, paths: WorkPaths, probe_path: Path) -> P
 def stage_g_allocate(cfg: PipelineConfig, paths: WorkPaths,
                      bridge_path: Path, costs_path: Path,
                      bf16_path: Path) -> Path:
-    recipe_path = paths.recipes_dir / f"recipe-PQ{cfg.budget_gb}-{cfg.priority}.json"
+    # Naming: PQ<budget_pct>-<priority> (matches final GGUF name for traceability).
+    # E.g. budget_auto_ratio=0.2 → recipe-PQ20-333.json.
+    recipe_path = paths.recipes_dir / f"recipe-PQ{cfg.budget_pct:g}-{cfg.priority}.json"
     if recipe_path.exists():
         _log(paths, "G", f"G. recipe cached at {recipe_path} (skip)")
         return recipe_path
@@ -569,7 +583,8 @@ def stage_h_quantize(cfg: PipelineConfig, paths: WorkPaths,
                      bf16_path: Path, recipe_path: Path,
                      imatrix_path: Path) -> Path:
     safe_name = sanitize_model_name(cfg.hf_model)
-    out_gguf = paths.gguf_output_path(safe_name, cfg.budget_gb, cfg.priority)
+    out_gguf = paths.gguf_output_path(safe_name, cfg.budget_pct, cfg.priority,
+                                       suffix=cfg.output_suffix)
     if out_gguf.exists():
         _log(paths, "H", f"H. GGUF cached at {out_gguf} (skip)")
         return out_gguf
@@ -657,12 +672,21 @@ def run_full_pipeline(cfg: PipelineConfig) -> Path:
     hf_dir       = stage_a_download(cfg, paths)
     bf16_path    = stage_b_convert(cfg, paths, hf_dir)
     # Auto-budget: derive after Stage B once BF16 size is known.
+    bf16_gb = bf16_path.stat().st_size / 1024**3
     if cfg.budget_gb is None:
-        bf16_gb = bf16_path.stat().st_size / 1024**3
         cfg.budget_gb = round(bf16_gb * cfg.budget_auto_ratio, 2)
+        # Auto-budget: percentage matches the user's ratio exactly (no
+        # rounding through GB), so --budget-auto-ratio 0.2 always names PQ20.
+        cfg.budget_pct = round(cfg.budget_auto_ratio * 100, 2)
         _log(paths, "B",
              f"B. auto-budget: BF16={bf16_gb:.2f} GB × {cfg.budget_auto_ratio:.0%} "
-             f"= {cfg.budget_gb} GB target (override with --budget-gb)")
+             f"= {cfg.budget_gb} GB target (PQ{cfg.budget_pct:g}, override with --budget-gb)")
+    else:
+        # Explicit --budget-gb: derive percentage from actual budget vs BF16.
+        cfg.budget_pct = round(cfg.budget_gb / bf16_gb * 100, 2)
+        _log(paths, "B",
+             f"B. budget: {cfg.budget_gb} GB / BF16={bf16_gb:.2f} GB "
+             f"= {cfg.budget_pct:g}% (PQ{cfg.budget_pct:g})")
     probe_path   = stage_c_probe(cfg, paths, hf_dir)
     imatrix_path = stage_d_imatrix(cfg, paths, bf16_path)
     costs_path   = stage_e_costs(cfg, paths, bf16_path, imatrix_path)
@@ -935,6 +959,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "runs that vary only allocator inputs (budget, priority, "
                          "floor-bpw). No fingerprinting performed — caller's "
                          "responsibility to ensure the cache matches the run.")
+    pr.add_argument("--output-suffix", default=None,
+                    help="Optional suffix appended to the auto-generated output "
+                         "GGUF basename. Default name is "
+                         "'<safe_hf_model>-PQ<budget_pct>-<priority>.gguf'; "
+                         "with --output-suffix mytest it becomes "
+                         "'<safe_hf_model>-PQ<budget_pct>-<priority>-mytest.gguf'. "
+                         "Useful for tagging experimental runs that share a "
+                         "(budget, priority) but vary other inputs (floor-bpw, "
+                         "formats list, calibration corpus).")
     pr.add_argument("--clean-all", action="store_true",
                     help="shorthand for --clean-shared --clean-imatrix --clean-probe. "
                          "After Stage H success, removes every per-model intermediate; "
@@ -982,6 +1015,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             attention_floor_bpw=args.attention_floor_bpw,
             floor_bpw=json.loads(args.floor_bpw) if args.floor_bpw else None,
             costs_cache=args.costs_cache,
+            output_suffix=args.output_suffix,
         )
         if args.formats:
             cfg_kwargs["formats"] = [f.strip() for f in args.formats.split(",")]

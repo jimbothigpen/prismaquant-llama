@@ -452,9 +452,20 @@ class WorkPaths:
         symlink_path.symlink_to(cached_imatrix)
         return symlink_path
 
-    def gguf_output_path(self, base_name: str, budget_gb: float, priority: str) -> Path:
-        """PQ<budget>-<XYZ> filename in ggufs/."""
-        fname = f"{base_name}-PQ{budget_gb}-{priority}.gguf"
+    def gguf_output_path(self, base_name: str, budget_pct: float, priority: str,
+                         suffix: Optional[str] = None) -> Path:
+        """PQ<budget_pct>-<XYZ>[-<suffix>] filename in ggufs/.
+
+        budget_pct is the budget as a percentage of BF16 size (e.g. 20 for a
+        20% target → PQ20). The :g format trims trailing zeros so 20.0 renders
+        as 20 but 22.5 stays as 22.5.
+
+        suffix is an optional user tag appended after priority, useful for
+        differentiating experimental runs (different floor-bpw, formats list,
+        calibration corpus) at the same budget+priority.
+        """
+        tail = f"-{suffix}" if suffix else ""
+        fname = f"{base_name}-PQ{budget_pct:g}-{priority}{tail}.gguf"
         return self.ggufs / fname
 
     def summary_lines(self) -> list[str]:
