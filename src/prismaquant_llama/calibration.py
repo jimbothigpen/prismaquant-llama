@@ -70,24 +70,63 @@ class FormatMeasurement:
     error: Optional[str] = None
 
 
-def _run_cmd(cmd: list[str], env: dict, timeout: float = 1800
-             ) -> tuple[int, str]:
-    print(f"  $ {' '.join(str(c) for c in cmd)}")
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        return 124, f"timeout after {timeout}s"
-    return proc.returncode, proc.stdout + "\n" + proc.stderr
+def _ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _quantize_one(cfg: Config, src: Path, dst: Path, fmt: str) -> bool:
+def _log(log_path: Path, msg: str) -> None:
+    """Print to stdout + append to a rolling log file. Used for meta-progress
+    messages so a single `tail -f calibrate.log` shows the whole calibration."""
+    line = f"[{_ts()}] {msg}"
+    print(line, flush=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a") as f:
+        f.write(line + "\n")
+
+
+def _run_cmd(cmd: list[str], env: dict, log_path: Path,
+             timeout: float = 1800) -> tuple[int, str]:
+    """Run subprocess with live tee to log_path (line-buffered) AND return the
+    full captured output for parsing PPL/bench numbers downstream.
+
+    Each invocation appends to log_path with a `=== <ts>: <cmd> ===` header,
+    so callers can `tail -f` the same file across multiple invocations.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  $ {' '.join(str(c) for c in cmd)}", flush=True)
+    captured: list[str] = []
+    with log_path.open("a") as f:
+        f.write(f"\n=== {_ts()}: {' '.join(str(c) for c in cmd)} ===\n")
+        f.flush()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                env=env, text=True, bufsize=1)
+        try:
+            for line in proc.stdout:  # type: ignore
+                f.write(line)
+                f.flush()
+                captured.append(line)
+        except KeyboardInterrupt:
+            proc.terminate()
+            raise
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return 124, "".join(captured) + f"\ntimeout after {timeout}s\n"
+    return proc.returncode, "".join(captured)
+
+
+def _quantize_one(cfg: Config, src: Path, dst: Path, fmt: str,
+                  log_path: Path) -> bool:
     bin_ = find_tool(cfg, "llama-quantize")
-    rc, _ = _run_cmd([str(bin_), str(src), str(dst), fmt], subprocess_env(cfg))
+    rc, _ = _run_cmd([str(bin_), str(src), str(dst), fmt],
+                     subprocess_env(cfg), log_path)
     return rc == 0 and dst.exists()
 
 
-def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path
+def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path,
+                        log_path: Path
                         ) -> tuple[Optional[float], Optional[float]]:
     bin_ = find_tool(cfg, "llama-perplexity")
     rc, log = _run_cmd(
@@ -95,7 +134,7 @@ def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path
          "-c", "2048", "-ngl", "99", "-fa", "on",
          "-ctk", "f16", "-ctv", "f16",
          "--chunks", str(cfg.ppl_chunks), "--no-mmap"],
-        subprocess_env(cfg))
+        subprocess_env(cfg), log_path)
     m = re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)", log)
     if not m:
         print(f"    WARN: no Final estimate (rc={rc}); last 5 log lines:")
@@ -105,14 +144,14 @@ def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path
     return float(m.group(1)), float(m.group(2))
 
 
-def _measure_bench(cfg: Config, gguf: Path
+def _measure_bench(cfg: Config, gguf: Path, log_path: Path
                    ) -> tuple[Optional[float], Optional[float]]:
     bin_ = find_tool(cfg, "llama-bench")
     rc, log = _run_cmd(
         [str(bin_), "-m", str(gguf), "-p", "512", "-n", "128",
          "-t", "12", "-ngl", "99", "-fa", "1",
          "-ctk", "f16", "-ctv", "f16", "--output", "csv"],
-        subprocess_env(cfg))
+        subprocess_env(cfg), log_path)
     pp = tg = None
     for line in log.splitlines():
         if '"512","0","0"' in line:
@@ -183,26 +222,85 @@ def _prepare_reference_gguf(cfg: Config, layout: Layout,
     raise ValueError(f"unknown input kind: {resolved.kind}")
 
 
-def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
-                       ppl_corpus: Path) -> dict[str, FormatMeasurement]:
-    """Run quantize → perplexity → bench for each format. Returns dict
-    keyed by format name. Always includes BF16 (or F16) as the reference."""
-    n_params = _count_params(ref_gguf)
+def _is_complete(m: FormatMeasurement) -> bool:
+    """A measurement is 'complete' (and skippable on resume) when every
+    field that calibrate normally fills is present, and there's no error."""
+    return (m.error is None
+            and m.bpw is not None
+            and m.ppl is not None
+            and m.pp is not None
+            and m.tg is not None)
 
-    # Always measure BF16 reference for ratio computation. If user didn't
-    # include it in `quants`, prepend it.
+
+def _load_existing(output_path: Path) -> dict[str, FormatMeasurement]:
+    """Load a prior partial perf JSON from disk so calibration can resume."""
+    if not output_path.exists():
+        return {}
+    try:
+        data = json.loads(output_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: dict[str, FormatMeasurement] = {}
+    for fmt, entry in data.items():
+        if fmt.startswith("_") or not isinstance(entry, dict):
+            continue
+        out[fmt] = FormatMeasurement(
+            bpw=entry.get("bpw"),
+            size_bytes=entry.get("size_bytes"),
+            ppl=entry.get("ppl"),
+            ppl_delta_vs_f16=entry.get("ppl_delta_vs_f16"),
+            pp=entry.get("pp"),
+            tg=entry.get("tg"),
+            pp_ratio_vs_bf16=entry.get("pp_ratio_vs_bf16"),
+            tg_ratio_vs_bf16=entry.get("tg_ratio_vs_bf16"),
+            error=entry.get("error"),
+        )
+    return out
+
+
+def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
+                       ppl_corpus: Path, layout: Layout, output_path: Path,
+                       model_name: str) -> dict[str, FormatMeasurement]:
+    """Run quantize → perplexity → bench for each format. Persists the perf
+    JSON after every format so a kill mid-sweep preserves progress, and on
+    re-entry skips formats already measured to completion.
+
+    Live subprocess output streams to {logs_dir}/calibrate-<fmt>.log; meta
+    progress lines also go to {logs_dir}/calibrate.log so a single tail
+    shows the whole calibration."""
+    n_params = _count_params(ref_gguf)
+    meta_log = layout.logs_dir / "calibrate.log"
+
+    # Always measure BF16 reference for ratio computation.
     formats = list(cfg.quants)
     if "BF16" not in formats:
         formats = ["BF16"] + formats
 
-    print(f"[calibrate] {len(formats)} formats × ~5–15 min each")
-    print(f"[calibrate] reference model: {ref_gguf} ({n_params/1e9:.2f}B params)")
+    # Resume from any prior partial perf JSON.
+    results: dict[str, FormatMeasurement] = _load_existing(output_path)
+    if results:
+        n_complete = sum(1 for m in results.values() if _is_complete(m))
+        _log(meta_log, f"[calibrate] resume: {n_complete}/{len(formats)} "
+                       f"formats already complete in {output_path}")
 
-    results: dict[str, FormatMeasurement] = {}
     bf16_ppl: Optional[float] = None
+    bf16_existing = results.get("BF16")
+    if bf16_existing and bf16_existing.ppl is not None:
+        bf16_ppl = bf16_existing.ppl
+
+    _log(meta_log, f"[calibrate] {len(formats)} formats × ~5–15 min each")
+    _log(meta_log, f"[calibrate] reference model: {ref_gguf} "
+                   f"({n_params/1e9:.2f}B params)")
+    _log(meta_log, f"[calibrate] live logs: {layout.logs_dir}/calibrate-*.log")
 
     for i, fmt in enumerate(formats, 1):
-        print(f"\n[{i:>2}/{len(formats)}] {fmt}")
+        existing = results.get(fmt)
+        if existing and _is_complete(existing):
+            _log(meta_log, f"[{i:>2}/{len(formats)}] {fmt} — cached, skip")
+            continue
+
+        _log(meta_log, f"[{i:>2}/{len(formats)}] {fmt}")
+        fmt_log = layout.logs_dir / f"calibrate-{fmt}.log"
         m = FormatMeasurement()
         scratch = scratch_dir / f"ref-{fmt}.gguf"
 
@@ -210,40 +308,44 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
             # Reference GGUF already IS this format — skip quantize, measure directly.
             target = ref_gguf
         else:
-            print(f"   quantize → {scratch.name}")
+            _log(meta_log, f"   quantize → {scratch.name}  (live: {fmt_log.name})")
             t0 = time.time()
-            if not _quantize_one(cfg, ref_gguf, scratch, fmt):
+            if not _quantize_one(cfg, ref_gguf, scratch, fmt, fmt_log):
                 m.error = "quantize failed"
                 results[fmt] = m
-                print(f"   FAIL ({time.time()-t0:.1f}s)")
+                _write_perf_json(output_path, results, model_name, cfg.ppl_chunks)
+                _log(meta_log, f"   FAIL ({time.time()-t0:.1f}s)")
                 continue
-            print(f"   ({time.time()-t0:.1f}s)")
+            _log(meta_log, f"   quantize done ({time.time()-t0:.1f}s)")
             target = scratch
 
         m.size_bytes = target.stat().st_size
         m.bpw = round(m.size_bytes * 8 / n_params, 4)
 
-        print(f"   ppl (chunks={cfg.ppl_chunks})")
-        ppl, ppl_err = _measure_perplexity(cfg, target, ppl_corpus)
+        _log(meta_log, f"   ppl (chunks={cfg.ppl_chunks})  (live: {fmt_log.name})")
+        ppl, ppl_err = _measure_perplexity(cfg, target, ppl_corpus, fmt_log)
         m.ppl, m.ppl_stderr = ppl, ppl_err
         if fmt == "BF16" and bf16_ppl is None:
             bf16_ppl = ppl
         elif bf16_ppl is not None and ppl is not None:
             m.ppl_delta_vs_f16 = round(ppl - bf16_ppl, 4)
 
-        print(f"   bench")
-        m.pp, m.tg = _measure_bench(cfg, target)
+        _log(meta_log, f"   bench  (live: {fmt_log.name})")
+        m.pp, m.tg = _measure_bench(cfg, target, fmt_log)
 
         results[fmt] = m
+        # Persist after every format so a crash preserves progress.
+        _write_perf_json(output_path, results, model_name, cfg.ppl_chunks)
 
         # Delete scratch (not the original ref_gguf)
         if target is scratch:
             try: scratch.unlink(missing_ok=True)
             except OSError: pass
 
-        print(f"   → bpw={m.bpw} ppl={m.ppl} pp={m.pp} tg={m.tg}")
+        _log(meta_log, f"   → bpw={m.bpw} ppl={m.ppl} "
+                       f"Δ={m.ppl_delta_vs_f16} pp={m.pp} tg={m.tg}")
 
-    # Backfill ratios after we have BF16 numbers
+    # Backfill ratios after we have BF16 numbers (idempotent — re-runnable on resume).
     bf16 = results.get("BF16")
     if bf16 and bf16.pp and bf16.tg:
         for m in results.values():
@@ -251,6 +353,14 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
                 m.pp_ratio_vs_bf16 = round(m.pp / bf16.pp, 4)
             if m.tg is not None:
                 m.tg_ratio_vs_bf16 = round(m.tg / bf16.tg, 4)
+    # Backfill ppl_delta_vs_f16 too, in case BF16 was measured later than other formats.
+    if bf16 and bf16.ppl is not None:
+        for fmt_name, m in results.items():
+            if (m.ppl is not None and m.ppl_delta_vs_f16 is None
+                    and fmt_name != "BF16"):
+                m.ppl_delta_vs_f16 = round(m.ppl - bf16.ppl, 4)
+    # Final write with all backfilled ratios in place.
+    _write_perf_json(output_path, results, model_name, cfg.ppl_chunks)
 
     return results
 
@@ -306,17 +416,19 @@ def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
     ppl_corpus, ppl_was_downloaded = resolve_corpus(cfg, "ppl")
     print(f"[calibrate] ppl_corpus: {ppl_corpus}")
 
-    ref_gguf = _prepare_reference_gguf(cfg, layout, resolved)
-
-    with tempfile.TemporaryDirectory(prefix="pq-cal-",
-                                     dir=str(layout.work)) as tmp:
-        results = _calibrate_formats(cfg, ref_gguf, Path(tmp), ppl_corpus)
-
+    # Compute the output path BEFORE running so resume can find a prior
+    # partial JSON if a previous calibration of this model+mode crashed.
     if mode == "system":
         output = layout.system_calibration_path()
     else:
         output = layout.model_calibration_path(resolved.model_name)
-    _write_perf_json(output, results, resolved.model_name, cfg.ppl_chunks)
+
+    ref_gguf = _prepare_reference_gguf(cfg, layout, resolved)
+
+    with tempfile.TemporaryDirectory(prefix="pq-cal-",
+                                     dir=str(layout.work)) as tmp:
+        _calibrate_formats(cfg, ref_gguf, Path(tmp), ppl_corpus,
+                           layout, output, resolved.model_name)
 
     print(f"\n[calibrate] perf JSON written → {output}")
 
