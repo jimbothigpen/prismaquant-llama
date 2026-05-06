@@ -1,0 +1,215 @@
+# prismaquant-llama configuration.
+#
+# This file lives at ~/.prismaquant-llama/config.toml. It is auto-installed
+# from the shipped default the first time you invoke the tool. After that,
+# edit this file by hand to change defaults — there is no `setup` subcommand.
+#
+# Every key here can be overridden per-run by a CLI flag of the same name
+# (with underscores replaced by dashes, e.g. ppl_chunks → --ppl-chunks).
+# CLI flags ALWAYS win. Missing keys fall through to built-in defaults.
+#
+# To use a different config file for a single run, pass `--config /path/to/other.toml`.
+# That can be useful if you maintain separate configs for separate llama.cpp
+# binary builds (e.g., one mainline, one fork) — point each config's `base`
+# and `path` at the appropriate directories.
+#
+# TOML reminders:
+#   - strings need quotes:  priority = "111"   (not 111)
+#   - lists use brackets:   quants = ["Q4_K", "Q5_K"]
+#   - paths can use ~:      base = "~/quants"
+#   - empty strings ("") mean "use the built-in default"
+
+
+[prismaquant-llama]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# base — working directory for downloads, intermediates, calibration data,
+# and final GGUFs.
+#
+# Layout under base:
+#   _shared/
+#     hf-cache/      ← downloaded HuggingFace safetensors
+#     bf16/          ← BF16 GGUFs converted from safetensors
+#     imatrix-cache/ ← imatrix files (one per (model, corpus, chunks) tuple)
+#     probe/         ← prismaquant Hessian probe artifacts
+#   ppl-corpus/      ← downloaded PPL calibration corpora (when URL given)
+#   imatrix-corpus/  ← downloaded imatrix calibration corpora (when URL given)
+#   calibration/
+#     system.json    ← written by `prismaquant-llama calibrate system <input>`
+#     models/<model>.json  ← written by `prismaquant-llama calibrate model <input>`
+#   ggufs/           ← final prismaquant GGUFs
+#   work/<run>/      ← per-run scratch (recipes, costs, logs)
+#
+# Override per-run with `--base /some/path`.
+# ──────────────────────────────────────────────────────────────────────────────
+base = "~/.prismaquant-llama/"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# path — directory containing the llama-quantize, llama-quantize-cost,
+# llama-perplexity, and llama-bench binaries.
+#
+# Empty string ("") means "discover via $PATH" — the same way `llama-quantize`
+# resolves at the shell. Set to a specific directory if your binaries aren't
+# on $PATH, e.g. "/opt/llama/bin" or "/home/me/llama.cpp/build/bin".
+#
+# `llama-quantize-cost` is a custom binary not in mainline llama.cpp; build
+# it from the source vendored at src/pipeline/cpp/quantize-cost/ and place
+# it next to llama-quantize. See the README for the recipe.
+#
+# Override per-run with `--path /opt/llama/bin`.
+# ──────────────────────────────────────────────────────────────────────────────
+path = ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# quants — the allowed weight-quant whitelist passed to the allocator and to
+# `llama-quantize-cost`. The allocator picks one format per tensor from this
+# list, minimizing predicted Δloss under the size budget.
+#
+# DEFAULT BELOW: mainline llama.cpp formats only. If you use a fork that adds
+# extra quants (ik_llama, frankenturbo, etc.), append them here by hand —
+# e.g. add "IQ4_K", "IQ4_KS", "IQ4_KSS", "IQ3_K", "IQ3_KS" for ik_llama.
+# Run `llama-quantize --help` against your binary to see what's available.
+#
+# 2-bit-and-under formats are intentionally excluded — they're a documented
+# PPL cliff on most architectures. Add them back here if you specifically
+# want extreme compression.
+#
+# Override per-run with `--quants Q4_K,Q5_K,...`.
+# ──────────────────────────────────────────────────────────────────────────────
+quants = [
+    "Q3_K",
+    "Q4_K",
+    "Q5_K",
+    "Q6_K",
+    "Q8_0",
+    "IQ3_XXS",
+    "IQ3_S",
+    "IQ4_XS",
+    "IQ4_NL",
+]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# budget — target final GGUF size as a percentage of the BF16 GGUF size.
+# Reference points (approximate, model-dependent):
+#   - Q8_0    → ~50%
+#   - Q6_K    → ~38%
+#   - Q5_K_M  → ~33%
+#   - Q4_K_M  → ~28%
+#   - IQ4_XS  → ~27%
+#   - Q3_K_L  → ~22%
+#
+# Default 25 sits slightly tighter than IQ4_XS — usable middle ground for
+# most production deployments.
+#
+# Override per-run with `--budget 30`.
+# ──────────────────────────────────────────────────────────────────────────────
+budget = 25
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# priority — three-digit ratio of PPL / TG / PP weights for the allocator's
+# multi-objective scoring.
+#
+#   - X = PPL quality weight  (digit 0–9)
+#   - Y = TG (token generation) speed weight  (digit 0–9)
+#   - Z = PP (prompt processing) speed weight  (digit 0–9)
+#
+# Only the relative ratios matter, so "111" and "333" and "999" all behave
+# identically (all equal-weight). "522" and "311" are also equivalent (PPL-heavy).
+#
+# Common combos:
+#   "111" — equal weight, balanced (default)
+#   "522" — quality-first
+#   "252" — token-generation-first (chat / streaming)
+#   "225" — prompt-processing-first (long-context)
+#   "900" — pure PPL, ignore speed
+#
+# Override per-run with `--priority 522`.
+# ──────────────────────────────────────────────────────────────────────────────
+priority = "111"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ppl_corpus — corpus used by llama-perplexity passes (calibration runs and
+# the final post-quantize PPL eval).
+#
+# Three input forms:
+#   ""              → use the bundled wikitext-2-raw test split (~1.3 MB).
+#                     Industry-standard llama.cpp PPL benchmark; gives values
+#                     directly comparable to other llama.cpp PPL numbers.
+#   "/some/path"    → use this on-disk text file. Never auto-deleted.
+#   "https://..."   → download to {base}/ppl-corpus/ on first use, then
+#                     cache. Subject to --purge cleanup.
+#
+# Override per-run with `--ppl-corpus /path/or/url`.
+# ──────────────────────────────────────────────────────────────────────────────
+ppl_corpus = ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# imatrix_corpus — corpus used by llama-imatrix to generate the importance
+# matrix consumed at quantize time. Different role from ppl_corpus —
+# imatrix wants diverse semantic content to surface activation distributions,
+# while PPL wants a clean reference text.
+#
+# Same three input forms as ppl_corpus:
+#   ""              → bundled bartowski-imatrix-v5-semantic (~1.5 MB).
+#                     Public compilation by bartowski; widely used as the
+#                     de-facto starter imatrix corpus.
+#   "/some/path"    → on-disk text file. Never auto-deleted.
+#   "https://..."   → download to {base}/imatrix-corpus/ on first use.
+#                     Subject to --purge cleanup.
+#
+# Override per-run with `--imatrix-corpus /path/or/url`.
+# ──────────────────────────────────────────────────────────────────────────────
+imatrix_corpus = ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ppl_chunks — number of chunks fed to llama-perplexity per evaluation.
+# Higher values give a tighter PPL stderr (better confidence in the measured
+# quality numbers) at proportional cost in wall time.
+#
+# Approximate stderr at default 50 chunks: ±0.09 PPL. Doubling chunks
+# narrows stderr roughly by sqrt(2). Production-grade calibration typically
+# uses 100–200 chunks; 50 is a reasonable balanced default.
+#
+# Override per-run with `--ppl-chunks 100`.
+# ──────────────────────────────────────────────────────────────────────────────
+ppl_chunks = 50
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# imatrix_chunks — number of chunks consumed by llama-imatrix when generating
+# the importance matrix. Higher = better activation-distribution coverage =
+# higher-quality imatrix = better quantize results, again at proportional
+# wall-time cost.
+#
+# Mainline llama.cpp guidance suggests 100–200 chunks for serious imatrix
+# generation. The default 50 here is a balanced starter — bump it up
+# (especially toward 200) for production-grade quants.
+#
+# Override per-run with `--imatrix-chunks 200`.
+# ──────────────────────────────────────────────────────────────────────────────
+imatrix_chunks = 50
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# convert_script — path to llama.cpp's `convert_hf_to_gguf.py` (used by
+# Stage B to convert HuggingFace safetensors to BF16 GGUF).
+#
+# This script is NOT installed by `cmake --install` / `make install` — it
+# stays at the root of your llama.cpp source tree. We try to find it
+# automatically by walking up two levels from `path` (works for
+# `<repo>/build/bin/llama-quantize` → `<repo>/convert_hf_to_gguf.py`),
+# checking next to the binary, then $PATH. If your install puts the
+# script somewhere unusual, set this key explicitly.
+#
+# Empty string ("") means auto-discover.
+#
+# Override per-run with `--convert-script /path/to/convert_hf_to_gguf.py`.
+# ──────────────────────────────────────────────────────────────────────────────
+convert_script = ""

@@ -1,0 +1,49 @@
+{
+  "_comment": "Hardware-agnostic per-format perf defaults. Calibrated at chunks=200 on Qwen/Qwen3-8B (frankenturbo2, gfx1150). Absolute pp/tg are nulled; only ratios ship. Overwritten when the user runs `prismaquant-llama calibrate system <input>`.",
+  "_reference_model": "Qwen/Qwen3-8B",
+  "_calibration_chunks": 200,
+  "_schema_version": 4,
+  "_reference_format": "BF16",
+  "F16": {
+    "pp": null, "tg": null,
+    "pp_ratio_vs_bf16": 0.9488, "tg_ratio_vs_bf16": 0.9974,
+    "ppl": 8.1188, "ppl_delta_vs_f16": 0.0,
+    "bpw": 16.0064
+  },
+  "BF16": {
+    "pp": null, "tg": null,
+    "pp_ratio_vs_bf16": 1.0, "tg_ratio_vs_bf16": 1.0,
+    "ppl": 8.1275, "ppl_delta_vs_f16": 0.0087,
+    "bpw": 16.0064
+  },
+  "Q4_K": {
+    "pp": null, "tg": null,
+    "pp_ratio_vs_bf16": 1.0352, "tg_ratio_vs_bf16": 2.9654,
+    "ppl": 8.2695, "ppl_delta_vs_f16": 0.1507,
+    "bpw": 4.9107
+  },
+  "Q5_K": {
+    "pp": null, "tg": null,
+    "pp_ratio_vs_bf16": 1.1116, "tg_ratio_vs_bf16": 2.653,
+    "ppl": 8.1942, "ppl_delta_vs_f16": 0.0754,
+    "bpw": 5.7149
+  },
+  "Q6_K": {
+    "pp": null, "tg": null,
+    "pp_ratio_vs_bf16": 0.8243, "tg_ratio_vs_bf16": 2.3543,
+    "ppl": 8.1693, "ppl_delta_vs_f16": 0.0505,
+    "bpw": 6.5693
+  },
+  "Q8_0": {
+    "pp": null, "tg": null,
+    "pp_ratio_vs_bf16": 0.9137, "tg_ratio_vs_bf16": 1.8884,
+    "ppl": 8.1494, "ppl_delta_vs_f16": 0.0306,
+    "bpw": 8.5067
+  },
+  "IQ4_XS": {
+    "pp": null, "tg": null,
+    "pp_ratio_vs_bf16": 0.3789, "tg_ratio_vs_bf16": 3.287,
+    "ppl": 8.2654, "ppl_delta_vs_f16": 0.1466,
+    "bpw": 4.4863
+  }
+}

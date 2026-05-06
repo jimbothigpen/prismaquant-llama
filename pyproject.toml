@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prismaquant-llama"
-version = "0.1.0a1"
-description = "Bring prismaquant's Bayesian per-tensor mixed-precision allocation to llama.cpp / GGUF — adapts the prismaquant allocator (originally targeted at vLLM) to work with any prismaquant-enabled fork of llama.cpp via a CLI + interactive TUI."
+version = "0.2.0a1"
+description = "Bring prismaquant's Bayesian per-tensor mixed-precision allocation to llama.cpp / GGUF — adapts the prismaquant allocator (originally targeted at vLLM) to work with any prismaquant-enabled fork of llama.cpp via a CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Jeremy Jones", email = "jeremy@myfacetwittertube.com"},
 ]
-keywords = ["llama.cpp", "prismaquant", "quantization", "gguf", "tui", "mixed-precision", "allocator"]
+keywords = ["llama.cpp", "prismaquant", "quantization", "gguf", "mixed-precision", "allocator"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -27,9 +27,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "InquirerPy>=0.3.4",
     "huggingface_hub>=0.20",
-    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +46,11 @@ Documentation = "https://github.com/jimbothigpen/prismaquant-llama#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["prismaquant_llama*"]
 
 [tool.setuptools.package-data]
-prismaquant_llama = ["format_metadata_base.json", "data/*.txt"]
+prismaquant_llama = [
+    "data/*",
+    "scripts/*.py",
+    "cpp/quantize-cost/*",
+]

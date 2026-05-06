@@ -1,991 +1,408 @@
 """
-Empirical calibration of weight quants on a user's binary + hardware.
+Calibration: measure per-format size, PPL, and pp/tg throughput.
 
-Three modes, ordered by cost:
+Two modes only:
 
-  1. calibrate_quick(binary, ref_model, formats)
-     Just quantizes ref_model with each format, measures output size,
-     derives bpw. ~30 sec/format = ~25 min for 53 formats. Result
-     supersedes heuristic-derived bpw permanently.
+    prismaquant-llama calibrate system <input>
+        Writes {base}/calibration/system.json. Used as the system-default
+        perf file for any model that doesn't have a model-specific calibration.
 
-  2. calibrate_deep(binary, ref_model, calibration_corpus, formats)
-     Adds llama-perplexity (PPL Δ vs f16) + llama-bench (PP/TG tps) per
-     format. ~5-15 min/format = 6-12 hours for full sweep. Generates an
-     empirical "this format costs X PPL and runs at Y tps on my hardware"
-     table.
+    prismaquant-llama calibrate model <input>
+        Writes {base}/calibration/models/<model_name>.json. Used specifically
+        for that model in subsequent `run` invocations.
 
-  3. ingest_prismaquant_cost_csv(cost_csv_path)
-     Slurps per-(tensor, format) MSE data from a prismaquant Stage D
-     output. Free, automatic — every pipeline run incrementally fills
-     out the metadata cache.
+Input forms (all four accepted by both modes — calibrate doesn't run the
+Bayesian probe so it doesn't need safetensors):
 
-All three modes write/update a JSON file at:
-    ~/.cache/prismaquant-wizard/binary-types/<binary-sha256>-calibrated.json
+    1. HuggingFace id              "unsloth/Qwen3.6-35B-A3B"
+    2. on-disk safetensors dir     "/path/to/safetensors"
+    3. on-disk f16/bf16 GGUF       "/path/to/model-BF16.gguf"
+    4. URL(s) to f16/bf16 GGUF     "https://...gguf"  (or split, comma-separated)
 
-Resume-safe: if the output file already has a format's data, that
-format is skipped on rerun. Disk-safe: each format's quantized output is
-deleted immediately after measurement (peak disk = 1× output, not Nx).
-
-Status: SCAFFOLD. Subprocess invocations + parser logic implemented; full
-end-to-end testing pending against a live binary.
+Pipeline:
+    1. Resolve input → BF16 GGUF on disk (download/convert as needed)
+    2. For each format in cfg.quants (plus BF16/F16 reference):
+         - quantize BF16 GGUF → format-specific GGUF
+         - run llama-perplexity → ppl, ppl_delta_vs_f16
+         - run llama-bench → pp, tg
+         - compute ratios vs BF16
+         - delete the format-specific GGUF
+    3. Write the perf JSON
 """
 
 from __future__ import annotations
-import csv
-import hashlib
+import argparse
 import json
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Iterable
+from typing import Optional
+
+from .config import (Config, load_config, find_tool, subprocess_env,
+                     resolve_corpus)
+from .input_resolver import ResolvedInput, resolve as resolve_input
+from .paths import Layout
+from .pipeline_runner import (download_hf, convert_to_bf16, download_gguf_url,
+                              cfg_from_args)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cache layout
+# Per-format measurement
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Centralized in paths.py (paths.DEFAULT_CACHE_ROOT). Backward-compat lookups
-# for legacy locations still happen in find_format_perf_file_for_binary.
-try:
-    from .paths import DEFAULT_CACHE_ROOT as CACHE_ROOT
-except ImportError:
-    from paths import DEFAULT_CACHE_ROOT as CACHE_ROOT  # type: ignore
-
-
-def _binary_sha256(binary: Path) -> str:
-    h = hashlib.sha256()
-    with binary.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _resolve_scratch_dir(output_path: Optional[Path]) -> Path:
-    """Pick where per-format temp ggufs should land. NEVER /tmp.
-
-    Per-format ref ggufs can be 50-200+ GB on large models; routing them
-    through /tmp risks filling the local filesystem (especially on hosts
-    where /tmp is a small tmpfs/ext4 partition). Always co-locate with the
-    output: if `output_path` is given, use its parent's `_scratch/`; if
-    not, fall back to the cache-root's `_scratch/` (still under the user's
-    home, never /tmp).
-    """
-    if output_path is not None:
-        scratch = output_path.parent / "_scratch"
-    else:
-        scratch = CACHE_ROOT / "_scratch"
-    scratch.mkdir(parents=True, exist_ok=True)
-    return scratch
-
-
-def calibration_cache_path(binary: Path, chunks: Optional[int] = None) -> Path:
-    """Full path to the calibrated-metadata JSON for this binary.
-
-    When `chunks` is provided, the path is chunk-tier-keyed
-    (`<bsha>__chunks<N>-calibrated.json`) so re-running at a higher tier
-    (--deep, --thorough, --reference) doesn't cache-hit the lower-tier
-    measurements. Each tier maintains an independent cache.
-
-    When `chunks` is None, returns the legacy unchunked path — kept
-    for backward compatibility with files emitted by earlier versions
-    and for the `set-default-perf` / `ingest` subcommands that don't
-    know the chunk count.
-    """
-    bsha = _binary_sha256(binary)
-    if chunks is not None:
-        return CACHE_ROOT / f"{bsha[:16]}__chunks{int(chunks)}-calibrated.json"
-    return CACHE_ROOT / f"{bsha[:16]}-calibrated.json"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Persistence
-# ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class CalibrationHeader:
-    binary_path: str = ""
-    binary_sha256: str = ""
-    ref_model: str = ""
-    ref_model_sha256: str = ""
-    ref_model_params: int = 0
-    calibration_corpus: str = ""
-    wikitext_chunks: int = 0
-    machine_id: str = ""
-    calibrated_at: str = ""
-
 
 @dataclass
 class FormatMeasurement:
-    """Per-format calibration result. All fields optional — different
-    modes populate different subsets.
-
-    The format-perf subset emitted via export_format_perf_subset() carries
-    a stable schema documented below. The CalibrationFile (this class) is
-    the richer superset.
-
-    format-perf schema (consumed by allocator's --tps flag):
-        Required: pp (≡ pp512_tps), tg (≡ tg128_tps)
-        Reserved future keys (not yet emitted; reader should ignore unknown):
-          - lat_p99_ms       — 99th-percentile decode latency (ms/token)
-          - mem_gb_per_param — runtime memory footprint per param
-          - ppl_delta_vs_f16 — quality penalty signal (could let allocator
-                               hard-skip a format whose Δ exceeds a bound)
-          - compatible       — explicit per-format compatibility flag
-                               (e.g. False if architecture's tensor shape
-                               can't be quantized to this format at all)
-    """
     bpw: Optional[float] = None
     size_bytes: Optional[int] = None
-    quantize_wallclock_sec: Optional[float] = None
     ppl: Optional[float] = None
     ppl_stderr: Optional[float] = None
     ppl_delta_vs_f16: Optional[float] = None
-    pp512_tps: Optional[float] = None
-    tg128_tps: Optional[float] = None
-    bench_wallclock_sec: Optional[float] = None
-    # Reserved for future schema extensions; not yet measured.
-    lat_p99_ms: Optional[float] = None
-    mem_gb_per_param: Optional[float] = None
-    compatible: Optional[bool] = None
+    pp: Optional[float] = None
+    tg: Optional[float] = None
+    pp_ratio_vs_bf16: Optional[float] = None
+    tg_ratio_vs_bf16: Optional[float] = None
     error: Optional[str] = None
 
 
-@dataclass
-class CalibrationFile:
-    header: CalibrationHeader = field(default_factory=CalibrationHeader)
-    formats: dict[str, FormatMeasurement] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "_header": asdict(self.header),
-            **{name: asdict(m) for name, m in self.formats.items()},
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "CalibrationFile":
-        header = CalibrationHeader(**d.get("_header", {}))
-        formats = {
-            name: FormatMeasurement(**v)
-            for name, v in d.items()
-            if not name.startswith("_")
-        }
-        return cls(header=header, formats=formats)
+def _run_cmd(cmd: list[str], env: dict, timeout: float = 1800
+             ) -> tuple[int, str]:
+    print(f"  $ {' '.join(str(c) for c in cmd)}")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return 124, f"timeout after {timeout}s"
+    return proc.returncode, proc.stdout + "\n" + proc.stderr
 
 
-def load_calibration_file(path: Path) -> CalibrationFile:
-    if not path.exists():
-        return CalibrationFile()
-    return CalibrationFile.from_dict(json.loads(path.read_text()))
+def _quantize_one(cfg: Config, src: Path, dst: Path, fmt: str) -> bool:
+    bin_ = find_tool(cfg, "llama-quantize")
+    rc, _ = _run_cmd([str(bin_), str(src), str(dst), fmt], subprocess_env(cfg))
+    return rc == 0 and dst.exists()
 
 
-def export_format_perf_subset(calib: CalibrationFile, output_path: Path,
-                              absolute_only: bool = False,
-                              ratios_only: bool = False) -> int:
-    """Extract format-perf subset from a CalibrationFile.
-
-    Output shape (consumed by the allocator's --tps flag and any future
-    consumers of per-format quality signals):
-
-        {
-          "_schema_version": 3,
-          "_reference_format": "BF16",
-          "Q4_K": {
-            "pp": 336.60,                    # PP512 tps (absolute, this binary+GPU)
-            "tg": 18.74,                     # TG128 tps (absolute)
-            "pp_ratio_vs_bf16": 0.91,        # hardware-portable: pp / pp(BF16)
-            "tg_ratio_vs_bf16": 2.62,        # hardware-portable: tg / tg(BF16)
-            "ppl": 6.92,
-            "ppl_delta_vs_f16": 0.094,
-            "bpw": 4.5106
-          },
-          ...
-        }
-
-    Schema versions:
-      - v1: pp + tg only
-      - v2: adds ppl, ppl_delta_vs_f16, bpw, size_bytes
-      - v3 (this): adds pp_ratio_vs_bf16, tg_ratio_vs_bf16 alongside abs.
-
-    Allocator reader prefers absolute values when present, falls back to
-    ratios. Population-mean normalization in the cost function makes the
-    two functionally equivalent (only relative magnitudes matter).
-
-    Modes:
-      - default: emit BOTH absolute + ratio (per-binary cache)
-      - absolute_only=True: only abs (smaller schema, legacy)
-      - ratios_only=True: emit ratio columns; abs set to None
-        (used for hardware-agnostic shipped defaults — abs values from
-        one machine are misleading on another)
-    """
-    out = {
-        "_comment": "Per-format perf characteristics from prismaquant-llama "
-                    "calibrate-deep. Schema v3: absolute pp/tg are this-binary-"
-                    "specific; pp_ratio_vs_bf16 / tg_ratio_vs_bf16 transfer "
-                    "across hardware (within ~20%). Allocator uses abs if "
-                    "available, ratios otherwise.",
-        "_reference_model": (calib.header.ref_model or "(unknown)"),
-        "_reference_model_sha256": calib.header.ref_model_sha256,
-        "_reference_model_params": calib.header.ref_model_params,
-        "_binary_sha256": calib.header.binary_sha256,
-        "_machine_id": calib.header.machine_id,
-        "_calibrated_at": calib.header.calibrated_at,
-        "_schema_version": 3,
-        "_reference_format": "BF16",
-    }
-
-    # Find BF16 (preferred) or F16 baseline for ratio computation
-    bf16_pp = bf16_tg = None
-    for ref_name in ("BF16", "F16"):
-        m = calib.formats.get(ref_name)
-        if m and m.pp512_tps is not None and m.tg128_tps is not None:
-            bf16_pp, bf16_tg = m.pp512_tps, m.tg128_tps
-            out["_reference_format"] = ref_name
-            break
-
-    n_emitted = 0
-    for fmt, m in calib.formats.items():
-        if m.pp512_tps is None or m.tg128_tps is None:
-            continue
-        entry = {}
-        # Absolute values (per-binary; null in ratios-only mode)
-        if ratios_only:
-            entry["pp"] = None
-            entry["tg"] = None
-        elif not absolute_only:
-            entry["pp"] = round(m.pp512_tps, 2)
-            entry["tg"] = round(m.tg128_tps, 2)
-        else:
-            entry["pp"] = round(m.pp512_tps, 2)
-            entry["tg"] = round(m.tg128_tps, 2)
-        # Ratios (hardware-portable; absent in absolute_only mode)
-        if not absolute_only and bf16_pp and bf16_tg:
-            entry["pp_ratio_vs_bf16"] = round(m.pp512_tps / bf16_pp, 4)
-            entry["tg_ratio_vs_bf16"] = round(m.tg128_tps / bf16_tg, 4)
-        # Quality + size (model-specific but useful)
-        if m.ppl is not None:
-            entry["ppl"] = round(m.ppl, 4)
-        if m.ppl_delta_vs_f16 is not None:
-            entry["ppl_delta_vs_f16"] = round(m.ppl_delta_vs_f16, 4)
-        if m.bpw is not None:
-            entry["bpw"] = round(m.bpw, 4)
-        if m.size_bytes is not None:
-            entry["size_bytes"] = int(m.size_bytes)
-        out[fmt] = entry
-        n_emitted += 1
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(out, indent=2))
-    return n_emitted
+def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path
+                        ) -> tuple[Optional[float], Optional[float]]:
+    bin_ = find_tool(cfg, "llama-perplexity")
+    rc, log = _run_cmd(
+        [str(bin_), "-m", str(gguf), "-f", str(corpus),
+         "-c", "2048", "-ngl", "99", "-fa", "on",
+         "-ctk", "f16", "-ctv", "f16",
+         "--chunks", str(cfg.ppl_chunks), "--no-mmap"],
+        subprocess_env(cfg))
+    m = re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)", log)
+    if not m:
+        print(f"    WARN: no Final estimate (rc={rc}); last 5 log lines:")
+        for line in log.splitlines()[-5:]:
+            print(f"      | {line}")
+        return None, None
+    return float(m.group(1)), float(m.group(2))
 
 
-# Centralized in paths.py. Backward-compat: if the legacy
-# ~/.config/prismaquant-llama/system-default-format-perf.json exists and
-# the new path doesn't, auto-discovery still finds the legacy file.
-try:
-    from .paths import DEFAULT_SYSTEM_PERF_PATH as SYSTEM_DEFAULT_PERF_PATH
-except ImportError:
-    from paths import DEFAULT_SYSTEM_PERF_PATH as SYSTEM_DEFAULT_PERF_PATH  # type: ignore
-
-_LEGACY_SYSTEM_DEFAULT_PERF_PATH = (
-    Path.home() / ".config" / "prismaquant-llama" / "system-default-format-perf.json"
-)
-
-
-def set_system_default_perf(source_path: Path) -> Path:
-    """Copy a format-perf file into the system-default slot at
-    ~/.config/prismaquant-llama/system-default-format-perf.json. Future
-    pipeline runs auto-discover this as a tier-3 fallback (after the
-    per-binary cache, before the package-shipped examples).
-
-    Returns the destination path."""
-    import shutil
-    SYSTEM_DEFAULT_PERF_PATH.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, SYSTEM_DEFAULT_PERF_PATH)
-    return SYSTEM_DEFAULT_PERF_PATH
+def _measure_bench(cfg: Config, gguf: Path
+                   ) -> tuple[Optional[float], Optional[float]]:
+    bin_ = find_tool(cfg, "llama-bench")
+    rc, log = _run_cmd(
+        [str(bin_), "-m", str(gguf), "-p", "512", "-n", "128",
+         "-t", "12", "-ngl", "99", "-fa", "1",
+         "-ctk", "f16", "-ctv", "f16", "--output", "csv"],
+        subprocess_env(cfg))
+    pp = tg = None
+    for line in log.splitlines():
+        if '"512","0","0"' in line:
+            parts = [p.strip('"') for p in line.split(",")]
+            if len(parts) >= 2:
+                try: pp = float(parts[-2])
+                except ValueError: pass
+        elif '"0","128","0"' in line:
+            parts = [p.strip('"') for p in line.split(",")]
+            if len(parts) >= 2:
+                try: tg = float(parts[-2])
+                except ValueError: pass
+    return pp, tg
 
 
-def find_format_perf_file_for_binary(binary: Path,
-                              examples_dir: Optional[Path] = None,
-                              default_format_perf_override: Optional[Path] = None,
-                              ) -> Optional[Path]:
-    """Resolve the best-available format-perf file for this binary.
-
-    Priority (highest → lowest):
-        1. `~/.cache/.../binary-types/<sha-prefix>-perf.json` (or legacy
-           `-tps.json`) — auto-generated from `calibrate deep` on this binary.
-           Most specific; always wins when present.
-        2. `default_format_perf_override` — user-supplied via
-           `--default-format-perf` flag or PRISMAQUANT_DEFAULT_FORMAT_PERF env
-           var. Per-run preference.
-        3. `~/.config/prismaquant-llama/system-default-format-perf.json` — the
-           user's "system default", written by `calibrate deep --set-as-system-default`.
-           Persists across binary rebuilds; serves as cross-binary fallback.
-        4. `<pkg>/examples/format-perf-default.json` — package-shipped
-           hardware-agnostic baseline. Format-relative throughput ratios
-           transfer roughly across GPUs (within ~20%) so this gives sensible
-           defaults for any user. Run `calibrate deep --set-as-system-default`
-           to get measured values for your specific hardware.
-
-    Returns None if no candidate file exists.
-    """
-    import os
-    import re
-    sha = _binary_sha256(binary)
-    sha_short = sha[:16]
-    # Cache dirs (priority order):
-    #   1. ~/.prismaquant-llama/cache/binary-types/  (current default)
-    #   2. ~/.cache/prismaquant-llama/binary-types/  (legacy, pre-consolidation)
-    #   3. ~/.cache/prismaquant-wizard/binary-types/ (oldest, wizard-era)
-    cache_dirs = [
-        CACHE_ROOT,  # new default → ~/.prismaquant-llama/cache/binary-types/
-        Path.home() / ".cache" / "prismaquant-llama" / "binary-types",
-        Path.home() / ".cache" / "prismaquant-wizard" / "binary-types",
-    ]
-    # Filename layouts (new chunks-keyed, then legacy unchunked, then -tps):
-    #   <sha>__chunks<N>-perf.json   (new — picks highest N when multiple)
-    #   <sha>-perf.json              (legacy unchunked)
-    #   <sha>-tps.json               (oldest naming; pre-rename)
-    # Among multiple chunks-keyed candidates, prefer the highest chunks count
-    # (more samples → tighter PPL stderr → more reliable allocator inputs).
-    # Legacy unchunked files rank below any chunks-keyed file (effectively
-    # treated as chunks=0 for sort purposes) since their fidelity is unknown.
-    def _chunks_of(name: str) -> int:
-        m = re.search(r"__chunks(\d+)-(perf|tps)\.json$", name)
-        return int(m.group(1)) if m else 0
-
-    candidates: list[tuple[int, Path]] = []
-    for cd in cache_dirs:
-        if not cd.exists():
-            continue
-        for stem in (sha_short, sha):
-            # Chunks-keyed (new naming).
-            for f in cd.glob(f"{stem}__chunks*-perf.json"):
-                candidates.append((_chunks_of(f.name), f))
-            for f in cd.glob(f"{stem}__chunks*-tps.json"):
-                candidates.append((_chunks_of(f.name), f))
-            # Legacy unchunked.
-            for legacy in (cd / f"{stem}-perf.json",
-                           cd / f"{stem}-tps.json"):
-                if legacy.exists():
-                    candidates.append((0, legacy))
-    if candidates:
-        # Highest chunks first; ties broken by file mtime (newer wins).
-        candidates.sort(key=lambda kv: (kv[0], kv[1].stat().st_mtime), reverse=True)
-        return candidates[0][1]
-    # User local default (CLI flag or env var)
-    if default_format_perf_override is None:
-        env_override = os.environ.get("PRISMAQUANT_DEFAULT_FORMAT_PERF")
-        if env_override:
-            default_format_perf_override = Path(env_override)
-    if default_format_perf_override is not None and default_format_perf_override.exists():
-        return default_format_perf_override
-    # System default (user wrote via `calibrate deep --set-as-system-default`).
-    # Check new location first, fall back to legacy ~/.config/prismaquant-llama/.
-    if SYSTEM_DEFAULT_PERF_PATH.exists():
-        return SYSTEM_DEFAULT_PERF_PATH
-    if _LEGACY_SYSTEM_DEFAULT_PERF_PATH.exists():
-        return _LEGACY_SYSTEM_DEFAULT_PERF_PATH
-    # Package-shipped baseline. The default file is intentionally hardware-
-    # agnostic — format-relative throughput ratios transfer roughly across
-    # GPUs (within ~20%) so a single calibrated reference serves as a sane
-    # starting point for any user. For accurate values on your specific
-    # hardware, run `prismaquant-llama calibrate deep --set-as-system-default`.
-    # Fallback chain (new naming preferred; legacy arch-suffixed names kept
-    # for backward compat with files emitted by earlier versions):
-    if examples_dir is not None:
-        for fname in ("format-perf-default.json",
-                      "format-perf.json",
-                      # legacy arch-suffixed (deprecated; matches by hostname)
-                      *(f"format-perf-{a}.json"
-                        for a in ("gfx1150", "gfx1102")),
-                      *(f"format-tps-{a}.json"
-                        for a in ("gfx1150", "gfx1102"))):
-            cand = examples_dir / fname
-            if cand.exists():
-                return cand
-    return None
-
-
-def save_calibration_file(path: Path, calib: CalibrationFile) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(calib.to_dict(), indent=2, default=str))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Param counting (read GGUF header)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def count_gguf_params(gguf_path: Path) -> int:
-    """Read the GGUF header to count total parameters across all tensors.
-    Type-agnostic — works with any quant type since parameter count
-    depends only on tensor shapes."""
+def _count_params(gguf: Path) -> int:
+    """Count total parameters from GGUF header (type-agnostic)."""
     import struct
     total = 0
-    with gguf_path.open("rb") as f:
-        magic = f.read(4)
-        if magic != b"GGUF":
-            raise ValueError(f"not a GGUF file: {gguf_path}")
-        version = struct.unpack("<I", f.read(4))[0]
+    with gguf.open("rb") as f:
+        if f.read(4) != b"GGUF":
+            raise ValueError(f"not a GGUF: {gguf}")
+        f.read(4)  # version
         n_tensors = struct.unpack("<Q", f.read(8))[0]
         n_kv = struct.unpack("<Q", f.read(8))[0]
-
-        # Skip metadata KV pairs
-        def skip_value(vt: int, f) -> None:
-            if vt in (0, 1, 7):  f.read(1)
-            elif vt in (2, 3):   f.read(2)
-            elif vt in (4, 5, 6):f.read(4)
-            elif vt in (10, 11, 12): f.read(8)
+        def skip_value(vt: int) -> None:
+            sizes = {0:1,1:1,7:1, 2:2,3:2, 4:4,5:4,6:4, 10:8,11:8,12:8}
+            if vt in sizes: f.read(sizes[vt])
             elif vt == 8:
-                slen = struct.unpack("<Q", f.read(8))[0]
-                f.read(slen)
+                slen = struct.unpack("<Q", f.read(8))[0]; f.read(slen)
             elif vt == 9:
                 etype = struct.unpack("<I", f.read(4))[0]
                 n = struct.unpack("<Q", f.read(8))[0]
-                for _ in range(n):
-                    skip_value(etype, f)
-
+                for _ in range(n): skip_value(etype)
         for _ in range(n_kv):
             klen = struct.unpack("<Q", f.read(8))[0]; f.read(klen)
-            skip_value(struct.unpack("<I", f.read(4))[0], f)
-
+            skip_value(struct.unpack("<I", f.read(4))[0])
         for _ in range(n_tensors):
             nlen = struct.unpack("<Q", f.read(8))[0]; f.read(nlen)
             n_dims = struct.unpack("<I", f.read(4))[0]
             dims = struct.unpack("<" + "Q" * n_dims, f.read(8 * n_dims))
-            f.read(4)   # type
-            f.read(8)   # offset
+            f.read(4); f.read(8)
             n_elem = 1
-            for d in dims:
-                n_elem *= d
+            for d in dims: n_elem *= d
             total += n_elem
     return total
 
 
-def file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Subprocess wrappers
+# Calibration core
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_quantize(binary: Path, src: Path, dst: Path, fmt: str,
-                  nthreads: Optional[int] = None, timeout: float = 600) -> tuple[bool, str]:
-    """Run llama-quantize. Returns (ok, log)."""
-    cmd = [str(binary), str(src), str(dst), fmt]
-    if nthreads:
-        cmd.append(str(nthreads))
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return proc.returncode == 0, proc.stdout + "\n" + proc.stderr
-    except subprocess.TimeoutExpired:
-        return False, f"timeout after {timeout}s"
+def _prepare_reference_gguf(cfg: Config, layout: Layout,
+                            resolved: ResolvedInput) -> Path:
+    """Get a BF16/F16 GGUF on disk for the reference model. Uses pipeline
+    helpers so calibrate→run sequences share intermediates."""
+    if resolved.kind == "hf":
+        sf = download_hf(cfg, layout, resolved.hf_id, resolved.model_name)
+        return convert_to_bf16(cfg, layout, sf, resolved.model_name)
+    if resolved.kind == "safetensors_dir":
+        return convert_to_bf16(cfg, layout, resolved.safetensors_dir,
+                               resolved.model_name)
+    if resolved.kind == "gguf_local":
+        return resolved.gguf_path
+    if resolved.kind == "gguf_url":
+        return download_gguf_url(cfg, layout, resolved.gguf_urls,
+                                  resolved.model_name)
+    raise ValueError(f"unknown input kind: {resolved.kind}")
 
 
-def _run_perplexity(perp_binary: Path, model: Path, calibration: Path,
-                    chunks: int = 4, c: int = 2048, env: Optional[dict] = None,
-                    timeout: float = 1800) -> tuple[Optional[float], Optional[float], str]:
-    """Run llama-perplexity. Returns (ppl, stderr, log)."""
-    # Force f16 KV cache. Calibration should always use neutral KV regardless
-    # of the binary's compile-time inference default. Some forks (e.g.
-    # frankenturbo2's experiment/buun-tcq-port) build with turbo3_tcq as the
-    # default SWA cache, which crashes on gfx1102 + iSWA archs (Gemma-3/4)
-    # mid-decode. Explicit f16 sidesteps that and keeps PPL numbers
-    # comparable across forks/branches.
-    cmd = [str(perp_binary), "-m", str(model), "-f", str(calibration),
-           "-c", str(c), "-ngl", "99", "-fa", "on",
-           "-ctk", "f16", "-ctv", "f16",
-           "--chunks", str(chunks), "--no-mmap"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, env=env)
-        log = proc.stdout + "\n" + proc.stderr
-    except subprocess.TimeoutExpired:
-        return None, None, "timeout"
-    m = re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)", log)
-    if not m:
-        # On parse miss, surface the exit code + last log lines so callers
-        # can diagnose silent failures (e.g. ROCm crashes, SIGABRT).
-        # Many builds print their actual error to stderr just before
-        # exiting with a non-zero code; capturing here avoids the trap of
-        # ppl=None being reported with no debugging info.
-        import sys as _sys
-        print(f"[_run_perplexity] WARN exit={proc.returncode}, no 'Final estimate' line. "
-              f"Last log lines:", file=_sys.stderr)
-        for line in (log.splitlines()[-15:]):
-            print(f"  | {line}", file=_sys.stderr)
-        return None, None, log
-    return float(m.group(1)), float(m.group(2)), log
+def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
+                       ppl_corpus: Path) -> dict[str, FormatMeasurement]:
+    """Run quantize → perplexity → bench for each format. Returns dict
+    keyed by format name. Always includes BF16 (or F16) as the reference."""
+    n_params = _count_params(ref_gguf)
 
+    # Always measure BF16 reference for ratio computation. If user didn't
+    # include it in `quants`, prepend it.
+    formats = list(cfg.quants)
+    if "BF16" not in formats:
+        formats = ["BF16"] + formats
 
-def _run_bench(bench_binary: Path, model: Path, p: int = 512, n: int = 128,
-               threads: int = 12, timeout: float = 600) -> tuple[Optional[float], Optional[float], str]:
-    """Run llama-bench. Returns (pp_tps, tg_tps, log)."""
-    # Force f16 KV (same rationale as _run_perplexity). For pp/tg numbers we
-    # want the binary's straightforward GEMM throughput, not perturbed by a
-    # compile-time KV default that may crash on iSWA archs on gfx1102.
-    cmd = [str(bench_binary), "-m", str(model),
-           "-p", str(p), "-n", str(n),
-           "-t", str(threads), "-ngl", "99", "-fa", "1",
-           "-ctk", "f16", "-ctv", "f16",
-           "--output", "csv"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        log = proc.stdout + "\n" + proc.stderr
-    except subprocess.TimeoutExpired:
-        return None, None, "timeout"
-    pp = tg = None
-    for line in log.splitlines():
-        if f'"{p}","0","0"' in line:
-            parts = [p.strip('"') for p in line.split(",")]
-            pp = float(parts[-2]) if len(parts) >= 2 else None
-        elif f'"0","{n}","0"' in line:
-            parts = [p.strip('"') for p in line.split(",")]
-            tg = float(parts[-2]) if len(parts) >= 2 else None
-    return pp, tg, log
+    print(f"[calibrate] {len(formats)} formats × ~5–15 min each")
+    print(f"[calibrate] reference model: {ref_gguf} ({n_params/1e9:.2f}B params)")
 
+    results: dict[str, FormatMeasurement] = {}
+    bf16_ppl: Optional[float] = None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Mode 1: quick (size only)
-# ─────────────────────────────────────────────────────────────────────────────
+    for i, fmt in enumerate(formats, 1):
+        print(f"\n[{i:>2}/{len(formats)}] {fmt}")
+        m = FormatMeasurement()
+        scratch = scratch_dir / f"ref-{fmt}.gguf"
 
-def calibrate_quick(binary: Path, ref_model: Path, formats: Iterable[str],
-                    output_path: Optional[Path] = None,
-                    machine_id: str = "",
-                    log = print) -> CalibrationFile:
-    """
-    Mode 1 — Size-only calibration. Quantizes ref_model with each format,
-    derives bpw from output size. ~30 sec/format. Resume-safe via output_path.
-
-    Args:
-        binary: path to llama-quantize
-        ref_model: input GGUF (e.g., Llama-3.2-1B-BF16)
-        formats: iterable of format names (e.g., ["Q4_K_M", "IQ4_K"])
-        output_path: where to persist results (default: ~/.cache/.../<sha>.json)
-        machine_id: optional human-readable machine tag for the header
-        log: print function (default print; pass logger.info for proper logging)
-
-    Returns:
-        CalibrationFile with bpw + size_bytes populated per format.
-    """
-    binary = binary.resolve()
-    ref_model = ref_model.resolve()
-    output_path = output_path or calibration_cache_path(binary)
-
-    calib = load_calibration_file(output_path)
-    n_params = count_gguf_params(ref_model)
-
-    # Cache invalidation: per-format measurements are ref_model-specific (PPL,
-    # bpw, size_bytes all depend on the model being quantized). The cache
-    # filename is binary-only, so a previous run against a different model
-    # leaves stale entries that look "complete" — drop them on ref_model mismatch.
-    current_ref_sha = file_sha256(ref_model)
-    if calib.header.ref_model_sha256 and calib.header.ref_model_sha256 != current_ref_sha:
-        log(f"[calibrate-quick] cache reset: existing cache was for "
-            f"ref_model={calib.header.ref_model} (sha={calib.header.ref_model_sha256[:16]}); "
-            f"now using {ref_model.name} (sha={current_ref_sha[:16]})")
-        calib = CalibrationFile()
-
-    # Update header (don't overwrite binary_sha if existing entries are still valid)
-    if not calib.header.binary_sha256:
-        calib.header.binary_path = str(binary)
-        calib.header.binary_sha256 = _binary_sha256(binary)
-    calib.header.ref_model = ref_model.name
-    calib.header.ref_model_sha256 = current_ref_sha
-    calib.header.ref_model_params = n_params
-    calib.header.machine_id = machine_id or calib.header.machine_id
-    calib.header.calibrated_at = datetime.now(timezone.utc).isoformat()
-
-    formats = list(formats)
-    log(f"[calibrate-quick] {len(formats)} formats × ~30s each = ~{len(formats)//2} min")
-    log(f"[calibrate-quick] cache: {output_path}")
-
-    with tempfile.TemporaryDirectory(prefix="prismaquant-wizard-cal-",
-                                      dir=str(_resolve_scratch_dir(output_path))) as tmp:
-        tmpdir = Path(tmp)
-        for i, fmt in enumerate(formats, 1):
-            existing = calib.formats.get(fmt)
-            if existing and existing.bpw is not None and existing.error is None:
-                log(f"[{i:>3}/{len(formats)}] {fmt:<14} cached (bpw={existing.bpw:.4f})")
-                continue
-            out = tmpdir / f"ref-{fmt}.gguf"
-            t0 = time.time()
-            ok, _ = _run_quantize(binary, ref_model, out, fmt)
-            dt = time.time() - t0
-            if not ok or not out.exists():
-                m = FormatMeasurement(error="quantize failed",
-                                      quantize_wallclock_sec=round(dt, 1))
-                calib.formats[fmt] = m
-                log(f"[{i:>3}/{len(formats)}] {fmt:<14} FAIL ({dt:.1f}s)")
-            else:
-                size = out.stat().st_size
-                bpw = round(size * 8 / n_params, 4)
-                m = FormatMeasurement(
-                    bpw=bpw, size_bytes=size,
-                    quantize_wallclock_sec=round(dt, 1),
-                )
-                calib.formats[fmt] = m
-                log(f"[{i:>3}/{len(formats)}] {fmt:<14} bpw={bpw:.4f} "
-                    f"size={size/1024**3:.2f}GB ({dt:.1f}s)")
-            # Persist after each format so a kill mid-sweep preserves progress
-            save_calibration_file(output_path, calib)
-            # Delete the quantized output to keep peak disk ~= 1× output
-            try:
-                out.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    return calib
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Mode 2: deep (size + PPL + bench)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def calibrate_deep(binary: Path, ref_model: Path, calibration_corpus: Path,
-                   formats: Iterable[str],
-                   perp_binary: Optional[Path] = None,
-                   bench_binary: Optional[Path] = None,
-                   output_path: Optional[Path] = None,
-                   chunks: int = 4, ctx: int = 2048,
-                   machine_id: str = "",
-                   env: Optional[dict] = None,
-                   skip_ppl: bool = False,
-                   log = print) -> CalibrationFile:
-    """
-    Mode 2 — Full calibration with PPL + bench. ~5-15 min per format.
-    Resume-safe. Re-derives bpw too (so this mode supersedes quick).
-
-    perp_binary / bench_binary: paths to llama-perplexity and llama-bench.
-    Default: same dir as `binary`.
-
-    skip_ppl: if True, run quantize+bench only (no perplexity). Useful when
-    the host hardware can't run perplexity reliably (e.g. gfx1102 iSWA HIP
-    bug on Gemma-3 / Gemma-4) but bench works fine. The resulting perf
-    file has null ppl/ppl_delta_vs_f16; merge with a PPL-only run from a
-    different host to get a complete cross-machine perf file.
-    """
-    binary = binary.resolve()
-    ref_model = ref_model.resolve()
-    output_path = output_path or calibration_cache_path(binary, chunks=chunks)
-    perp_binary = perp_binary or (binary.parent / "llama-perplexity")
-    bench_binary = bench_binary or (binary.parent / "llama-bench")
-
-    if not skip_ppl and not perp_binary.exists():
-        raise FileNotFoundError(f"llama-perplexity not found: {perp_binary}")
-    if not bench_binary.exists():
-        raise FileNotFoundError(f"llama-bench not found: {bench_binary}")
-    if not calibration_corpus.exists():
-        raise FileNotFoundError(f"calibration corpus not found: {calibration_corpus}")
-
-    calib = load_calibration_file(output_path)
-    n_params = count_gguf_params(ref_model)
-
-    # Cache invalidation on ref_model change (see note in calibrate_quick).
-    current_ref_sha = file_sha256(ref_model)
-    if calib.header.ref_model_sha256 and calib.header.ref_model_sha256 != current_ref_sha:
-        log(f"[calibrate-deep] cache reset: existing cache was for "
-            f"ref_model={calib.header.ref_model} (sha={calib.header.ref_model_sha256[:16]}); "
-            f"now using {ref_model.name} (sha={current_ref_sha[:16]})")
-        calib = CalibrationFile()
-
-    # Header bookkeeping (same as quick)
-    if not calib.header.binary_sha256:
-        calib.header.binary_path = str(binary)
-        calib.header.binary_sha256 = _binary_sha256(binary)
-    calib.header.ref_model = ref_model.name
-    calib.header.ref_model_sha256 = current_ref_sha
-    calib.header.ref_model_params = n_params
-    calib.header.calibration_corpus = str(calibration_corpus)
-    calib.header.wikitext_chunks = chunks
-    calib.header.machine_id = machine_id or calib.header.machine_id
-    calib.header.calibrated_at = datetime.now(timezone.utc).isoformat()
-
-    formats = list(formats)
-    log(f"[calibrate-deep] {len(formats)} formats × ~10 min each = "
-        f"~{len(formats) * 10 // 60} h estimated")
-    if skip_ppl:
-        log(f"[calibrate-deep] --skip-ppl: bench-only mode (no perplexity)")
-    log(f"[calibrate-deep] cache: {output_path}")
-
-    # Get/establish f16 reference PPL (needed for ppl_delta_vs_f16). If F16
-    # (or BF16 as fallback) is in the format list, move it to the front so
-    # subsequent formats can compute Δ as they're measured. If F16 isn't in
-    # the list at all and we don't have its ppl cached, prepend it.
-    # When skip_ppl=True there's no PPL to anchor against, so leave format
-    # order untouched.
-    f16_ppl = calib.formats.get("F16", FormatMeasurement()).ppl
-    if not skip_ppl and f16_ppl is None:
-        if "F16" in formats:
-            formats = ["F16"] + [f for f in formats if f != "F16"]
-        elif "BF16" in formats and calib.formats.get("BF16", FormatMeasurement()).ppl is None:
-            # No F16 in list; promote BF16 if present (16-bit reference)
-            formats = ["BF16"] + [f for f in formats if f != "BF16"]
+        if fmt in ("BF16", "F16") and ref_gguf.stem.endswith(("BF16", "F16")):
+            # Reference GGUF already IS this format — skip quantize, measure directly.
+            target = ref_gguf
         else:
-            formats = ["F16"] + formats   # neither cached nor in list — prepend F16
-
-    with tempfile.TemporaryDirectory(prefix="prismaquant-wizard-cal-",
-                                      dir=str(_resolve_scratch_dir(output_path))) as tmp:
-        tmpdir = Path(tmp)
-        for i, fmt in enumerate(formats, 1):
-            m = calib.formats.get(fmt, FormatMeasurement())
-            ppl_satisfied = skip_ppl or m.ppl is not None
-            if (ppl_satisfied and m.pp512_tps is not None
-                    and m.bpw is not None and m.error is None):
-                log(f"[{i:>3}/{len(formats)}] {fmt:<14} cached (full)")
-                continue
-
-            out = tmpdir / f"ref-{fmt}.gguf"
-            log(f"[{i:>3}/{len(formats)}] {fmt:<14} quantize...")
+            print(f"   quantize → {scratch.name}")
             t0 = time.time()
-            ok, qlog = _run_quantize(binary, ref_model, out, fmt)
-            qdt = time.time() - t0
-            if not ok or not out.exists():
+            if not _quantize_one(cfg, ref_gguf, scratch, fmt):
                 m.error = "quantize failed"
-                m.quantize_wallclock_sec = round(qdt, 1)
-                calib.formats[fmt] = m
-                save_calibration_file(output_path, calib)
+                results[fmt] = m
+                print(f"   FAIL ({time.time()-t0:.1f}s)")
                 continue
+            print(f"   ({time.time()-t0:.1f}s)")
+            target = scratch
 
-            size = out.stat().st_size
-            m.size_bytes = size
-            m.bpw = round(size * 8 / n_params, 4)
-            m.quantize_wallclock_sec = round(qdt, 1)
+        m.size_bytes = target.stat().st_size
+        m.bpw = round(m.size_bytes * 8 / n_params, 4)
 
-            if skip_ppl:
-                pdt = 0.0
-            else:
-                log(f"             {fmt:<14} ppl... (chunks={chunks}, c={ctx})")
-                t0 = time.time()
-                ppl, ppl_err, plog = _run_perplexity(perp_binary, out, calibration_corpus,
-                                                     chunks=chunks, c=ctx, env=env)
-                pdt = time.time() - t0
-                if ppl is None:
-                    m.error = (m.error or "") + " ppl failed;"
-                else:
-                    m.ppl = ppl
-                    m.ppl_stderr = ppl_err
-                    # Set f16_ppl from F16 first; fall back to BF16 if no F16.
-                    if fmt == "F16" or (fmt == "BF16" and f16_ppl is None):
-                        f16_ppl = ppl
-                        # Backfill deltas for any prior formats that lacked an
-                        # f16 reference at measurement time.
-                        for prior_fmt, prior_m in calib.formats.items():
-                            if (prior_m.ppl is not None
-                                    and prior_m.ppl_delta_vs_f16 is None
-                                    and prior_fmt not in ("F16", "BF16")):
-                                prior_m.ppl_delta_vs_f16 = round(prior_m.ppl - f16_ppl, 4)
-                    if f16_ppl is not None:
-                        m.ppl_delta_vs_f16 = round(ppl - f16_ppl, 4)
+        print(f"   ppl (chunks={cfg.ppl_chunks})")
+        ppl, ppl_err = _measure_perplexity(cfg, target, ppl_corpus)
+        m.ppl, m.ppl_stderr = ppl, ppl_err
+        if fmt == "BF16" and bf16_ppl is None:
+            bf16_ppl = ppl
+        elif bf16_ppl is not None and ppl is not None:
+            m.ppl_delta_vs_f16 = round(ppl - bf16_ppl, 4)
 
-            log(f"             {fmt:<14} bench...")
-            t0 = time.time()
-            pp, tg, blog = _run_bench(bench_binary, out)
-            bdt = time.time() - t0
-            m.pp512_tps = pp
-            m.tg128_tps = tg
-            m.bench_wallclock_sec = round(bdt, 1)
+        print(f"   bench")
+        m.pp, m.tg = _measure_bench(cfg, target)
 
-            calib.formats[fmt] = m
-            save_calibration_file(output_path, calib)
-            log(f"             {fmt:<14} → bpw={m.bpw:.4f} "
-                f"ppl={m.ppl} Δ={m.ppl_delta_vs_f16} "
-                f"pp={pp} tg={tg}  ({qdt+pdt+bdt:.0f}s total)")
+        results[fmt] = m
 
-            try:
-                out.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # Delete scratch (not the original ref_gguf)
+        if target is scratch:
+            try: scratch.unlink(missing_ok=True)
+            except OSError: pass
 
-    # After all formats measured, emit the format-perf subset so pipeline_runner
-    # auto-discovers it via find_format_perf_file_for_binary().
-    perf_path = output_path.parent / f"{output_path.stem.replace('-calibrated','')}-perf.json"
-    n = export_format_perf_subset(calib, perf_path)
-    log(f"[calibrate-deep] format-perf subset → {perf_path} ({n} formats)")
+        print(f"   → bpw={m.bpw} ppl={m.ppl} pp={m.pp} tg={m.tg}")
 
-    return calib
+    # Backfill ratios after we have BF16 numbers
+    bf16 = results.get("BF16")
+    if bf16 and bf16.pp and bf16.tg:
+        for m in results.values():
+            if m.pp is not None:
+                m.pp_ratio_vs_bf16 = round(m.pp / bf16.pp, 4)
+            if m.tg is not None:
+                m.tg_ratio_vs_bf16 = round(m.tg / bf16.tg, 4)
+
+    return results
+
+
+def _write_perf_json(output: Path, results: dict[str, FormatMeasurement],
+                     model_name: str, chunks: int) -> None:
+    out = {
+        "_schema_version": 4,
+        "_reference_model": model_name,
+        "_reference_format": "BF16",
+        "_calibrated_at": datetime.now(timezone.utc).isoformat(),
+        "_calibration_chunks": chunks,
+    }
+    for fmt, m in results.items():
+        entry: dict = {}
+        if m.bpw is not None:        entry["bpw"] = m.bpw
+        if m.size_bytes is not None: entry["size_bytes"] = m.size_bytes
+        if m.ppl is not None:        entry["ppl"] = round(m.ppl, 4)
+        if m.ppl_delta_vs_f16 is not None:
+            entry["ppl_delta_vs_f16"] = m.ppl_delta_vs_f16
+        if m.pp is not None:         entry["pp"] = round(m.pp, 2)
+        if m.tg is not None:         entry["tg"] = round(m.tg, 2)
+        if m.pp_ratio_vs_bf16 is not None:
+            entry["pp_ratio_vs_bf16"] = m.pp_ratio_vs_bf16
+        if m.tg_ratio_vs_bf16 is not None:
+            entry["tg_ratio_vs_bf16"] = m.tg_ratio_vs_bf16
+        if m.error:
+            entry["error"] = m.error
+        out[fmt] = entry
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(out, indent=2))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Mode 3: ingest from prismaquant pipeline output
+# Public entrypoints
 # ─────────────────────────────────────────────────────────────────────────────
 
-def ingest_prismaquant_cost_csv(cost_csv: Path,
-                                output_path: Optional[Path] = None,
-                                binary_for_cache_key: Optional[Path] = None,
-                                log = print) -> CalibrationFile:
-    """
-    Mode 3 — Slurp per-(tensor, format) MSE data from prismaquant Stage D.
+def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
+                  purge: str) -> Path:
+    """Run calibration. mode ∈ {'system', 'model'}.
 
-    The prismaquant pipeline already measures MSE per format during cost
-    measurement. This mode reads that CSV and folds the per-format
-    aggregates into the wizard's metadata cache. Free, automatic.
+    Returns path to the written perf JSON."""
+    layout = Layout.for_run(base=cfg.base, model_name=resolved.model_name)
+    layout.make()
 
-    cost_csv: path to a Stage D output CSV produced by llama-quantize-cost.
-    binary_for_cache_key: which binary's cache to update. Required if
-        output_path isn't given.
-    """
-    if output_path is None:
-        if binary_for_cache_key is None:
-            raise ValueError("supply output_path or binary_for_cache_key")
-        output_path = calibration_cache_path(binary_for_cache_key)
+    print("=" * 70)
+    print(f"prismaquant-llama calibrate {mode} — {resolved.model_name}")
+    print("=" * 70)
+    for line in layout.summary_lines():
+        print(line)
+    print()
 
-    calib = load_calibration_file(output_path)
+    ppl_corpus, ppl_was_downloaded = resolve_corpus(cfg, "ppl")
+    print(f"[calibrate] ppl_corpus: {ppl_corpus}")
 
-    # Aggregate MSE per format (mean across tensors that have data)
-    by_format: dict[str, list[float]] = {}
-    with cost_csv.open() as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            fmt = row.get("format") or row.get("type")
-            if not fmt:
-                continue
-            try:
-                mse = float(row.get("mse") or row.get("MSE"))
-            except (TypeError, ValueError):
-                continue
-            by_format.setdefault(fmt.upper(), []).append(mse)
+    ref_gguf = _prepare_reference_gguf(cfg, layout, resolved)
 
-    n_updated = 0
-    for fmt, mses in by_format.items():
-        m = calib.formats.get(fmt, FormatMeasurement())
-        # MSE is supplemental — store it in a field we extend later, or
-        # surface as a derived "quality_proxy". For now, we just log.
-        log(f"  ingest {fmt}: n_tensors={len(mses)} mean_MSE={sum(mses)/len(mses):.4g}")
-        # Future: persist by_format[fmt] into FormatMeasurement.mse_per_tensor
-        n_updated += 1
+    with tempfile.TemporaryDirectory(prefix="pq-cal-",
+                                     dir=str(layout.work)) as tmp:
+        results = _calibrate_formats(cfg, ref_gguf, Path(tmp), ppl_corpus)
 
-    save_calibration_file(output_path, calib)
-    log(f"[ingest-prismaquant-cost] processed {n_updated} formats from {cost_csv}")
-    return calib
+    if mode == "system":
+        output = layout.system_calibration_path()
+    else:
+        output = layout.model_calibration_path(resolved.model_name)
+    _write_perf_json(output, results, resolved.model_name, cfg.ppl_chunks)
+
+    print(f"\n[calibrate] perf JSON written → {output}")
+
+    # Purge logic mirrors run_pipeline: delete what we downloaded/generated
+    # if input wasn't on-disk. Corpora download cleanup also applies.
+    user_owns_model = resolved.kind in ("safetensors_dir", "gguf_local")
+    if purge == "yes":
+        if not user_owns_model:
+            if resolved.kind == "hf":
+                target = layout.hf_cache / resolved.model_name
+                if target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                    print(f"  [purge] removed: hf-cache/{resolved.model_name}")
+            if resolved.kind == "gguf_url":
+                target = layout.gguf_cache / resolved.model_name
+                if target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                    print(f"  [purge] removed: gguf-cache/{resolved.model_name}")
+            bf16 = layout.bf16_dir / f"{resolved.model_name}-BF16.gguf"
+            if bf16.exists() and resolved.kind in ("hf", "safetensors_dir"):
+                # Only delete if WE generated it (not for gguf_local/url where
+                # the input GGUF is the file itself)
+                if resolved.kind == "hf":
+                    bf16.unlink()
+                    print("  [purge] removed: bf16")
+        if ppl_was_downloaded:
+            ppl_corpus.unlink(missing_ok=True)
+            print("  [purge] removed: ppl-corpus")
+
+    print("=" * 70)
+    return output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+def add_calibrate_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("mode", choices=("system", "model"),
+                   help="'system' writes {base}/calibration/system.json; "
+                        "'model' writes {base}/calibration/models/<name>.json")
+    p.add_argument("input", metavar="INPUT",
+                   help="HuggingFace id, on-disk safetensors dir, on-disk "
+                        "f16/bf16 GGUF, or URL(s) to a GGUF "
+                        "(comma-separate split files)")
+    p.add_argument("--config", type=Path, default=None,
+                   help="alternative config.toml")
+    p.add_argument("--libs", type=Path, default=None,
+                   help="extra dir prepended to LD_LIBRARY_PATH")
+    p.add_argument("--base", type=Path, default=None)
+    p.add_argument("--path", type=Path, default=None)
+    p.add_argument("--quants", default=None,
+                   help="comma-separated quants list (default: from config)")
+    p.add_argument("--ppl-corpus", default=None)
+    p.add_argument("--ppl-chunks", type=int, default=None)
+    p.add_argument("--convert-script", type=Path, default=None,
+                   help="path to convert_hf_to_gguf.py (default: from config "
+                        "or auto-discover; only relevant when input is "
+                        "safetensors and Stage B convert needs to run)")
+    p.add_argument("--purge", choices=("yes", "no"), default="yes",
+                   help="clean up downloaded/generated artifacts after "
+                        "(default: yes; never deletes user-supplied on-disk inputs)")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    import argparse
-    import sys
-    p = argparse.ArgumentParser(description="Calibrate weight quants on this binary + hardware")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    # quick
-    pq = sub.add_parser("quick", help="size-only calibration (~25 min)")
-    pq.add_argument("--binary", type=Path, required=True)
-    pq.add_argument("--ref-model", type=Path, required=True,
-                    help="GGUF to quantize (e.g., Llama-3.2-1B-BF16.gguf)")
-    pq.add_argument("--formats", required=True,
-                    help="comma-separated format names, or 'all' (use discover)")
-    pq.add_argument("--output", type=Path)
-    pq.add_argument("--machine-id", default="")
-
-    # deep
-    pd = sub.add_parser("deep", help="size + PPL + bench (~6-12 hours)")
-    pd.add_argument("--binary", type=Path, required=True)
-    pd.add_argument("--ref-model", type=Path, required=True)
-    pd.add_argument("--calibration-corpus", type=Path, required=True)
-    pd.add_argument("--formats", required=True)
-    pd.add_argument("--output", type=Path)
-    pd.add_argument("--chunks", type=int, default=None,
-                    help="number of llama-perplexity chunks per format. Overrides "
-                         "any --quick/--deep/--thorough/--reference preset. "
-                         "Default when no preset given: 25 (balanced — reliably "
-                         "ranks adjacent K-quants for most 4B+ models).")
-    chunks_preset = pd.add_mutually_exclusive_group()
-    chunks_preset.add_argument("--quick", dest="chunks_preset", action="store_const", const=10,
-                    help="N=10 chunks. Fast iteration / sanity check. "
-                         "Reliably distinguishes only ~0.5+ PPL gaps.")
-    chunks_preset.add_argument("--deep", dest="chunks_preset", action="store_const", const=50,
-                    help="N=50 chunks. Production perf files. Reliably "
-                         "distinguishes adjacent K-quants (~0.10 PPL).")
-    chunks_preset.add_argument("--thorough", dest="chunks_preset", action="store_const", const=100,
-                    help="N=100 chunks. Cross-binary baseline. Reliable for "
-                         "~0.05 PPL diffs.")
-    chunks_preset.add_argument("--reference", dest="chunks_preset", action="store_const", const=200,
-                    help="N=200 chunks. Publication-grade. Use for the one-time "
-                         "global-default perf file you ship in examples/.")
-    pd.add_argument("--ctx", type=int, default=2048)
-    pd.add_argument("--machine-id", default="")
-    pd.add_argument("--perp-binary", type=Path)
-    pd.add_argument("--bench-binary", type=Path)
-    pd.add_argument("--skip-ppl", action="store_true",
-                    help="Skip the perplexity step; quantize + bench only. "
-                         "Useful when the host can't run perplexity reliably "
-                         "but bench works (e.g. gfx1102 iSWA HIP bug on Gemma "
-                         "models). Output perf file has null ppl/Δ; merge with "
-                         "a PPL-only run from a working host for a complete file.")
-    pd.add_argument("--set-as-system-default", action="store_true",
-                    help="After calibration completes, copy the resulting "
-                         "format-perf JSON to ~/.config/prismaquant-llama/"
-                         "system-default-format-perf.json. Future pipeline "
-                         "runs auto-discover this as a cross-binary default "
-                         "(tier 3 in find_format_perf_file_for_binary). "
-                         "Use once with your preferred reference model "
-                         "(e.g., a 9B dense like Qwopus3.5-9B-v3.5).")
-
-    # set-default (manual)
-    psd = sub.add_parser("set-default-perf",
-                         help="Set an existing format-perf JSON as the system default")
-    psd.add_argument("--source", type=Path, required=True,
-                     help="path to existing format-perf JSON to install")
-
-    # ingest
-    pi = sub.add_parser("ingest", help="absorb prismaquant Stage D cost.csv")
-    pi.add_argument("--cost-csv", type=Path, required=True)
-    pi.add_argument("--binary", type=Path, required=True,
-                    help="binary whose cache to update (for cache key)")
-
+    p = argparse.ArgumentParser(prog="prismaquant-llama calibrate",
+                                description="Measure per-format perf data")
+    add_calibrate_args(p)
     args = p.parse_args(argv)
 
-    if args.cmd in ("quick", "deep"):
-        if args.formats == "all":
-            from format_discovery import discover_formats
-            fmts = list(discover_formats(args.binary, all_formats=True).keys())
-        else:
-            fmts = [f.strip() for f in args.formats.split(",") if f.strip()]
-        if args.cmd == "quick":
-            calibrate_quick(args.binary, args.ref_model, fmts,
-                            output_path=args.output, machine_id=args.machine_id)
-        else:
-            # Resolve effective chunk count from the precedence:
-            #   explicit --chunks N > --quick/--deep/--thorough/--reference > default 25
-            preset = getattr(args, "chunks_preset", None)
-            chunks_eff = args.chunks if args.chunks is not None else (preset or 25)
-            calib = calibrate_deep(args.binary, args.ref_model, args.calibration_corpus,
-                           fmts, perp_binary=args.perp_binary,
-                           bench_binary=args.bench_binary,
-                           output_path=args.output, chunks=chunks_eff, ctx=args.ctx,
-                           machine_id=args.machine_id,
-                           skip_ppl=getattr(args, "skip_ppl", False))
-            if getattr(args, "set_as_system_default", False):
-                # Locate the perf file calibrate_deep just emitted
-                cache_path = args.output or calibration_cache_path(args.binary)
-                perf_path = cache_path.parent / f"{cache_path.stem.replace('-calibrated','')}-perf.json"
-                if perf_path.exists():
-                    dst = set_system_default_perf(perf_path)
-                    print(f"[calibrate-deep] system default → {dst}")
-                else:
-                    print(f"[calibrate-deep] WARN: --set-as-system-default specified but "
-                          f"no perf file at {perf_path}", file=sys.stderr)
-    elif args.cmd == "ingest":
-        ingest_prismaquant_cost_csv(args.cost_csv, binary_for_cache_key=args.binary)
-    elif args.cmd == "set-default-perf":
-        if not args.source.exists():
-            print(f"ERROR: source perf file not found: {args.source}", file=sys.stderr)
-            return 1
-        dst = set_system_default_perf(args.source)
-        print(f"system default → {dst}")
-    return 0
+    # Reuse run-style config resolution for the shared flags.
+    # Fill missing run-only flags with defaults so cfg_from_args is happy.
+    args.budget = None
+    args.priority = None
+    args.imatrix_corpus = None
+    args.imatrix_chunks = None
+    cfg = cfg_from_args(args)
+
+    resolved = resolve_input(args.input, allow_gguf=True)
+    try:
+        run_calibrate(cfg, args.mode, resolved, args.purge)
+        return 0
+    except (SystemExit, FileNotFoundError, ValueError) as e:
+        print(f"\nFAIL: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())

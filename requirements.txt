@@ -1,4 +1,0 @@
-# Runtime deps. For dev tooling, install with `pip install -e ".[dev]"`.
-InquirerPy>=0.3.4
-huggingface_hub>=0.20
-PyYAML>=6.0

@@ -3,57 +3,32 @@
 > **Bring [prismaquant](https://github.com/RobTand/prismaquant)'s
 > Bayesian per-tensor mixed-precision allocation to llama.cpp / GGUF.**
 
-A CLI + interactive TUI that adapts the prismaquant allocator
-(originally targeted at vLLM / compressed-tensors) to work with **any
-build of llama.cpp** — mainline
-[`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp) or any
-fork. The only build requirement on the llama.cpp side is the
-`llama-quantize-cost` tool, whose source is vendored in this repo
-([`src/pipeline/cpp/quantize-cost/`](src/pipeline/cpp/quantize-cost/));
-drop those two files into your llama.cpp's `tools/quantize-cost/`,
-re-build with `-DGGML_BUILD_TOOLS=ON`, and you're done.
+A CLI that adapts the prismaquant allocator (originally built for vLLM /
+compressed-tensors) to **any build of llama.cpp** — mainline
+[`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp) or any fork.
+The only build-side requirement is the `llama-quantize-cost` tool, whose
+source ships inside the package; drop it into your llama.cpp tree, rebuild,
+and you're done.
 
-> **Disclosure — this is vibe-coded.** I'm an enthusiast, not a
-> programmer. Every line of code, doc, and commit message in this repo
-> was written with [Claude Code](https://claude.com/claude-code) doing
-> the actual implementation; I drive the design decisions, review
-> changes, and decide what ships. This is disclosed up front because the
-> volume of activity here would otherwise be misleading — assume
-> AI-assisted unless explicitly stated otherwise. Issues and PRs are
-> still welcome; just calibrate expectations accordingly. The
-> mathematical core (prismaquant's closed-form Δloss surrogate) is
-> [RobTand](https://github.com/RobTand/prismaquant)'s work, not mine.
+> **Disclosure — vibe-coded.** I'm an enthusiast, not a programmer. Every
+> line of code, doc, and commit message in this repo was written with
+> [Claude Code](https://claude.com/claude-code) doing the actual
+> implementation; I drive the design, review changes, and decide what
+> ships. The mathematical core (prismaquant's closed-form Δloss surrogate)
+> is [RobTand](https://github.com/RobTand/prismaquant)'s work.
 
-> **Status: alpha / working preview.** End-to-end pipeline executes
-> through all nine stages (A→I) without manual intervention; format
-> auto-discovery + calibration + auto-budget defaults make typical use
-> a single command. The interactive TUI wrapper around the pipeline is
-> still scaffold (4 screens, no back-navigation yet) but the
-> `pipeline run` subcommand is the real thing. See
-> [What works today](#what-works-today) and [TODO list](#todo).
-
-> 🆕 **New here? Start with [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md)** —
-> a hands-on walkthrough that gets you from zero to a working
-> prismaquant GGUF in ~30 minutes, then walks through calibration,
-> budget/priority customization, and common workflows.
+> **Status: alpha.** End-to-end pipeline executes through all nine stages
+> (A→I) without manual intervention. Two CLI subcommands (`run` +
+> `calibrate`); persistent defaults via a hand-edited TOML config.
 
 ## What this does
 
-For each Linear in your model, prismaquant picks a *different* ggml
-format under a total-size budget, minimizing measured Δloss
-`= ½ · H_trace · MSE`. Output is a standard GGUF — no patches, no custom
-runtime. Validated wins on Qwen3.6-35B-A3B (qwen35moe hybrid):
-prismaquant 14 GB recipe = 6.13 PPL vs best uniform IQ3_KS at 14.2 GB =
-6.61 PPL — **−0.48 PPL at the same memory footprint** (see
-[`docs/methodology.md`](docs/methodology.md) for the full analysis).
-
-This project provides:
-- An interactive TUI that lowers the barrier for new users
-- A unified CLI (`prismaquant-llama`) with subcommands for each pipeline stage
-- Auto-discovery of formats from any llama-quantize binary
-- Empirical calibration (size / PPL / throughput) on the user's binary + hardware
-- Path management for the multi-stage build artifacts (HF safetensors,
-  imatrix, probe, costs, recipes, GGUFs)
+For each Linear in your model, prismaquant picks a *different* ggml format
+under a total-size budget, minimizing measured Δloss `= ½ · H_trace · MSE`.
+Output is a standard GGUF — no patches, no custom runtime. Validated wins
+on Qwen3.6-35B-A3B (qwen35moe hybrid): prismaquant 14 GB recipe = 6.13 PPL
+vs. best uniform IQ3_KS at 14.2 GB = 6.61 PPL — **−0.48 PPL at the same
+memory footprint** (see [`docs/methodology.md`](docs/methodology.md)).
 
 ## Install
 
@@ -63,311 +38,251 @@ pip install --user prismaquant-llama          # once published to PyPI
 pip install -e .
 ```
 
-### Required external dependencies
+The package is fully self-contained after install — bundled corpora,
+pipeline scripts, the C++ source for `llama-quantize-cost`, and the
+shipped default config.toml all live inside the installed package and
+require no source-tree access at runtime.
 
-prismaquant-llama is a pure-Python orchestrator; it shells out to
-several external tools that must be present on `$PATH` (or pointed at
-via `--binary`). One of these is custom and must be built against your
-llama.cpp fork.
+### Required external tools
+
+prismaquant-llama is a pure-Python orchestrator; it shells out to:
 
 | Tool | Source | Notes |
 |---|---|---|
-| `llama-quantize` | your llama.cpp fork | standard mainline tool |
-| `llama-imatrix` | your llama.cpp fork | standard mainline tool |
-| `llama-perplexity` | your llama.cpp fork | standard mainline tool |
-| `llama-bench` | your llama.cpp fork | standard mainline tool |
-| `llama-quantize-cost` | **see [`src/pipeline/cpp/quantize-cost/`](src/pipeline/cpp/quantize-cost/)** | not yet upstream — drop the source into your llama.cpp tree and rebuild with `-DGGML_BUILD_TOOLS=ON`. The README in that directory has full instructions. |
-| `prismaquant` Python package | **[`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant)** | provides `prismaquant.incremental_probe` for the Hessian probe stage. **Use this fork** rather than upstream `RobTand/prismaquant` — the fork carries patches needed for Gemma-4 (iSWA, kv-sharing) and NemotronH (Mamba-2 hybrid) architectures. See [`FORK-NOTES.md`](https://github.com/jimbothigpen/prismaquant/blob/main/FORK-NOTES.md) for the full patch list. Install: `pip install git+https://github.com/jimbothigpen/prismaquant.git` |
+| `llama-quantize` | your llama.cpp build | standard mainline |
+| `llama-imatrix` | your llama.cpp build | standard mainline |
+| `llama-perplexity` | your llama.cpp build | standard mainline |
+| `llama-bench` | your llama.cpp build | standard mainline |
+| `llama-quantize-cost` | **bundled — see below** | not yet upstream |
+| `prismaquant` Python package | **[`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant)** | provides `prismaquant.incremental_probe` for Stage C. Install: `pip install git+https://github.com/jimbothigpen/prismaquant.git` |
 
-If your fork already ships `llama-quantize-cost` (e.g.,
-[`jimbothigpen/frankenturbo2`](https://github.com/jimbothigpen/frankenturbo2)
-at `tools/quantize-cost/`), you don't need to copy anything — just
-ensure that fork's `build/bin/llama-quantize-cost` is on `$PATH` (or
-matches the `--binary` directory).
+### Building `llama-quantize-cost`
 
-## Quick run
-
-> Want a guided walkthrough instead of these one-liners?
-> See [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) — covers
-> the same content with explanations, sensible default values, and a
-> stage-by-stage timing table.
+The C++ source ships inside the installed package. To find it:
 
 ```bash
-# Minimum invocation — works out of the box on any host with llama-quantize
-# on $PATH. Uses bundled calibration corpus (bartowski-v3) and writes to
-# ~/.prismaquant-llama/builds/<model>-prismaquant/.
-prismaquant-llama pipeline run --hf-model unsloth/gemma-3-4b-it
-
-# Recommended: full pipeline, all overrides explicit, auto-budget (25% × BF16),
-# equal-priority. Pass --hf-model with a SAFETENSORS repo (NOT a -GGUF repo).
-prismaquant-llama pipeline run \
-    --hf-model google/gemma-4-E4B-it \
-    --binary /path/to/your-fork/build/bin/llama-quantize \
-    --calibration /path/to/your-domain-corpus.txt \
-    --output ~/prismaquant-builds
-
-# Same model, explicit budget + PPL-heavy priority
-prismaquant-llama pipeline run \
-    --hf-model google/gemma-4-E4B-it \
-    --binary /path/to/llama-quantize \
-    --calibration /path/to/calibration.txt \
-    --output ~/prismaquant-builds \
-    --budget-gb 4.5 --priority 522
-
-# Re-run with different budgets — Stages A-D cache hit, runs in ~5-10 min
-prismaquant-llama pipeline run --hf-model google/gemma-4-E4B-it \
-    --calibration ... --output ~/prismaquant-builds --budget-gb 3.0
-prismaquant-llama pipeline run --hf-model google/gemma-4-E4B-it \
-    --calibration ... --output ~/prismaquant-builds --budget-gb 6.0
-
-# Format auto-discovery against a binary (no other files required)
-prismaquant-llama discover /path/to/llama-quantize
-
-# Empirical calibration — quick mode (~25 min for 53 formats)
-prismaquant-llama calibrate quick --binary /path/to/llama-quantize \
-    --ref-model /path/to/Llama-3.2-1B-BF16.gguf --formats all
-
-# Inspect the output dir layout that would be created for a given root + model
-prismaquant-llama paths layout --output ~/prismaquant-builds --model-name myModel
-
-# Bare invocation drops you into the (still-scaffold) wizard
-prismaquant-llama
+python -c "import prismaquant_llama; print(prismaquant_llama.quantize_cost_source_path())"
 ```
 
-## CLI subcommands
+Copy that directory into your llama.cpp tree's `tools/`, register it, and
+rebuild:
 
-| Command | Purpose |
-|---|---|
-| **`prismaquant-llama pipeline run`** | **End-to-end build (recommended).** Runs A→I with auto-budget + cache-aware re-runs. |
-| `prismaquant-llama discover` | auto-discover supported formats from a binary's `--help` |
-| `prismaquant-llama calibrate {quick,deep,ingest}` | empirical calibration; quick = size only (~25 min), deep = + PPL/bench (overnight), ingest = absorb prismaquant Stage D cost.csv |
-| `prismaquant-llama paths {layout,find-binaries}` | inspect output dir layout / discover llama.cpp tool binaries |
-| `prismaquant-llama wizard` | (alpha) interactive TUI — currently the same 4-screen scaffold; production-quality TUI still TODO |
-| `prismaquant-llama` (no args) | drops you into the wizard (default) |
+```bash
+SRC=$(python -c "import prismaquant_llama; print(prismaquant_llama.quantize_cost_source_path())")
+cp -r "$SRC" /path/to/your/llama.cpp/tools/
+echo 'add_subdirectory(quantize-cost)' >> /path/to/your/llama.cpp/tools/CMakeLists.txt
+cmake --build /path/to/your/llama.cpp/build --target llama-quantize-cost
+```
 
-Run `prismaquant-llama <subcommand> --help` for per-subcommand options.
+The resulting binary lands at `build/bin/llama-quantize-cost` — same
+directory as `llama-quantize`. Works against mainline, ik_llama,
+frankenturbo2, etc.
 
-## Screen flow (when running the TUI)
+## Usage
 
-| Screen | Asks | Maps to |
+Two subcommands. That's the whole CLI.
+
+```bash
+prismaquant-llama run INPUT [flags]
+prismaquant-llama calibrate {system|model} INPUT [flags]
+```
+
+### `run` — full pipeline
+
+```bash
+prismaquant-llama run unsloth/gemma-3-4b-it
+```
+
+That's it. First invocation auto-installs a starter
+`~/.prismaquant-llama/config.toml` and uses bundled defaults for everything
+else. INPUT must be a HuggingFace id or an on-disk safetensors directory —
+the Bayesian probe (Stage C) requires safetensors.
+
+To override defaults for one run:
+
+```bash
+prismaquant-llama run unsloth/gemma-3-4b-it \
+    --budget 30 \
+    --priority 522 \
+    --quants Q4_K,Q5_K,Q6_K,Q8_0,IQ4_XS \
+    --imatrix-chunks 200 \
+    --ppl-chunks 100
+```
+
+For persistent overrides, edit `~/.prismaquant-llama/config.toml`. The
+shipped default is heavily commented and explains every key.
+
+### `calibrate` — measure per-format perf
+
+`calibrate system` builds the system-wide perf table the allocator
+consumes by default. Run once with a representative reference model
+(typically a small dense like Llama-3.2-1B-BF16 or Qwen3-8B):
+
+```bash
+prismaquant-llama calibrate system Qwen/Qwen3-8B
+# → ~/.prismaquant-llama/calibration/system.json
+```
+
+`calibrate model` builds a model-specific perf table that overrides the
+system default for that one model. Useful when a target model has unusual
+sensitivity:
+
+```bash
+prismaquant-llama calibrate model unsloth/gemma-3-4b-it
+# → ~/.prismaquant-llama/calibration/models/gemma-3-4b-it.json
+```
+
+Calibration accepts all four input forms (HF id, on-disk safetensors dir,
+on-disk f16/bf16 GGUF, URL to GGUF — comma-separate split files), since
+calibrate doesn't run the probe stage.
+
+### `--config` and `--libs`
+
+Both flags are universal across commands:
+
+- `--config /some/other.toml` uses an alternative config file. Useful for
+  maintaining separate configs per fork (one mainline, one ik_llama, etc.) —
+  point each config's `path` and `base` at the appropriate directories.
+- `--libs /opt/llama/lib` prepends a directory to `LD_LIBRARY_PATH` for
+  every subprocess call. Use when your llama.cpp libs aren't on the
+  system loader path.
+
+## Configuration
+
+`~/.prismaquant-llama/config.toml` (auto-installed on first run). Single
+section, flat keys, fully commented:
+
+```toml
+[prismaquant-llama]
+base           = "~/.prismaquant-llama/"
+path           = ""                                # empty = $PATH
+quants         = ["Q3_K","Q4_K","Q5_K","Q6_K","Q8_0",
+                  "IQ3_XXS","IQ3_S","IQ4_XS","IQ4_NL"]
+budget         = 25                                # % of BF16
+priority       = "111"                             # PPL/TG/PP, each 0–9
+ppl_corpus     = ""                                # empty = bundled wikitext
+imatrix_corpus = ""                                # empty = bundled bartowski-v5
+ppl_chunks     = 50
+imatrix_chunks = 50
+convert_script = ""                                # empty = auto-discover; set if cmake-installed
+```
+
+**`convert_script`**: `convert_hf_to_gguf.py` is NOT installed by
+`cmake --install` / `make install` — it stays at the root of your
+llama.cpp source tree. We auto-find it at `<fork>/convert_hf_to_gguf.py`
+(walking up two levels from `path`), or next to the binary, or via
+`$PATH`. If your install puts it elsewhere, set this key explicitly
+or pass `--convert-script /path/to/convert_hf_to_gguf.py`.
+
+**Mainline-only quants** ship as the default. Users running a fork
+(ik_llama, frankenturbo2, etc.) can hand-add fork-specific formats —
+run `llama-quantize --help` against your binary to see the full list.
+
+**Bundled corpora** (used when `ppl_corpus` / `imatrix_corpus` are empty):
+
+| Default | Source | Size |
 |---|---|---|
-| 1 | HF model ID + revision | `huggingface-cli download` |
-| 2 | Calibration corpus (preset or path) | `--dataset` to probe + `-f` to imatrix |
-| 3 | Format whitelist (auto-discovered from binary) | `--types` to `llama-quantize-cost` |
-| 4 | Priority XYZ + budget GB | `--priority` + `--budget-gb` to allocator |
+| PPL | wikitext-2-raw test split | ~1.3 MB |
+| imatrix | [bartowski-imatrix-v5-semantic](https://huggingface.co/datasets/lemon07r/bartowski-imatrix-v5-semantic) | ~1.5 MB |
 
-## Format discovery (Screen 3 / `discover` subcommand)
+Set `ppl_corpus` or `imatrix_corpus` to a path or URL to use your own.
+URLs are downloaded to `{base}/ppl-corpus/` or `{base}/imatrix-corpus/`
+and reused on subsequent runs (subject to `--purge` cleanup).
 
-The format whitelist is built dynamically by parsing `<binary> --help`,
-intersected with a metadata overlay. Four discovery layers, merged in
-order — later layers override earlier:
+## Output layout
 
-1. **Heuristic** (always) — extract bpw + family + source from
-   `<binary> --help` output text. Works on any binary, including
-   forks the wizard has never seen.
-2. **`format_metadata_base.json`** (ships in this package) — covers
-   mainline llama.cpp + ikllama with curated bpw, recommend flags, notes.
-3. **`format_metadata_<forkname>.json`** (fork-supplied, **OPTIONAL**)
-   — convention path: `<binary>/../../tools/prismaquant/format_metadata_*.json`.
-   Forks ship their own file describing fork-specific formats. **No
-   buy-in required**: forks without an extension file still work; their
-   custom formats fall through to heuristic classification.
-4. **`~/.config/prismaquant-llama/format_metadata_*.json`** (user
-   override) — final layer; flip `recommend` flags for personal taste.
-
-Cached per binary SHA-256 in `~/.cache/prismaquant-llama/binary-types/`.
-
-## Empirical calibration (`calibrate` subcommand)
-
-Three modes for filling the metadata with measured data instead of
-relying on the heuristic alone:
-
-| Mode | What it measures | Time (53 formats) | When to use |
-|---|---|---|---|
-| `quick` | output size → bpw | ~25 min on 1B ref model | one-time setup, accurate bpw on this binary |
-| `deep`  | + PPL Δ vs f16, + PP/TG tps | 25 min – 10 hr (depends on `--chunks`) | produces "your binary, your hardware" curve |
-| `ingest`| reads prismaquant Stage D cost.csv | seconds | automatic, every pipeline run feeds the cache |
-
-Calibrated metadata persists at
-`~/.cache/prismaquant-llama/binary-types/<binary-sha256>__chunks<N>-calibrated.json`.
-Each chunks tier maintains an independent cache file — re-running at a
-higher tier doesn't cache-hit the lower-tier measurements.
-
-### Chunks presets — PPL-Δ confidence vs. wall time
-
-`calibrate deep` accepts `--chunks N` directly OR one of the named presets:
-
-| Flag | N | Reliable Δ | Use case |
-|---|---:|---:|---|
-| `--quick` | 10 | ±0.20 PPL | smoke test / dev iteration |
-| (default) | **25** | ±0.13 PPL | balanced — ranks adjacent K-quants for most ≥4B models |
-| `--deep` | 50 | ±0.09 PPL | production per-binary perf files |
-| `--thorough` | 100 | ±0.06 PPL | cross-binary baselines |
-| `--reference` | 200 | ±0.04 PPL | one-time global-default ship |
-
-Why this matters: the shipped `examples/format-perf-default.json` is
-calibrated at `--reference` (200 chunks). When the allocator consults
-the perf file, it walks a 4-tier priority chain:
+All paths under `{base}` (default `~/.prismaquant-llama/`):
 
 ```
-Tier 1: per-binary cache       ~/.cache/.../<sha>__chunks<N>-perf.json
-Tier 2: --format-perf override per-run flag
-Tier 3: system default         ~/.config/prismaquant-llama/system-default-format-perf.json
-Tier 4: package examples       examples/format-perf-default.json   ← shipped at --reference
+base/
+├── _shared/              cached intermediates (reused across runs)
+│   ├── hf-cache/<model>/        downloaded HF safetensors
+│   ├── bf16/<model>-BF16.gguf   BF16 conversions
+│   ├── gguf-cache/              GGUFs downloaded from URL (calibrate)
+│   ├── imatrix-cache/           imatrix files
+│   └── probe/                   prismaquant probe artifacts
+├── ppl-corpus/           downloaded PPL corpora
+├── imatrix-corpus/       downloaded imatrix corpora
+├── calibration/
+│   ├── system.json              from `calibrate system`
+│   └── models/<model>.json      from `calibrate model`
+├── ggufs/                final prismaquant GGUFs
+└── work/<run>/           per-run scratch (recipes, costs, logs)
 ```
 
-**Tier 1 always wins over Tier 4** — even if Tier 1 is a `--quick` (10
-chunks) calibration and Tier 4 is `--reference` (200 chunks). This is
-intentional: per-binary captures hardware-specific throughput (pp/tg)
-that the hardware-normalized shipped default deliberately strips. Within
-Tier 1, the highest-chunks variant wins automatically.
+Filename convention for final outputs:
+`<model>-PQ<budget>-<priority>.gguf` — e.g., `gemma-3-4b-it-PQ25-111.gguf`.
 
-⚠️ **Heads-up on calibration quality**: a hasty `--quick` calibration
-on your binary will outrank the high-fidelity shipped default for that
-binary. PPL-Δ noise at chunks=10 can flip the ranking of adjacent
-K-quants, which propagates into allocator scoring. If you want best
-allocation quality:
+## `--purge` cleanup
 
-- Run at least `--deep` (50 chunks) for any per-binary cache you intend
-  to keep (or `--thorough` if you can spare the time).
-- Reserve `--quick` for dev iteration where rankings aren't critical.
-- If a fast calibration is the only one available, the allocator still
-  produces a valid recipe — the worst-case is that it picks a slightly
-  suboptimal format for one or two layers.
+`--purge yes` (default): delete artifacts this invocation downloaded or
+generated, except final GGUFs and per-run logs. Never touches user-supplied
+on-disk inputs (safetensors directories, GGUF files, corpus files you
+passed by path).
 
-To explicitly use the shipped default instead of your local calibration:
-`prismaquant-llama pipeline run --format-perf $(python -c 'import prismaquant_llama, pathlib; print(pathlib.Path(prismaquant_llama.__file__).parents[2] / "examples/format-perf-default.json")') ...`
+`--purge no`: keep everything for re-use by subsequent runs.
 
-## Output directory layout
+Concretely, `--purge yes` removes:
 
-```
-<output>/                            ← --output / -o, default ~/prismaquant-builds/
-├── _shared/                         ← reusable across runs
-│   ├── calibration/                 ← wikitext / c4 / the-pile
-│   ├── hf-cache/                    ← HF safetensors
-│   └── imatrix-cache/               ← keyed by (model_sha, corpus_sha, chunks)
-├── ggufs/                           ← final outputs (override with --output-ggufs)
-└── work/<model>-<timestamp>/        ← per-run scratch (cleanable with --keep-work=false)
-    ├── bf16/, probe/, costs/, recipes/, logs/
-```
+- HF safetensors download under `_shared/hf-cache/<model>/` (only when
+  INPUT was an HF id)
+- Downloaded GGUFs under `_shared/gguf-cache/<model>/` (only when INPUT
+  was a URL)
+- BF16 GGUF under `_shared/bf16/<model>-BF16.gguf` (only when generated
+  this run from non-on-disk input)
+- imatrix files for this model under `_shared/imatrix-cache/`
+- probe artifacts for this model under `_shared/probe/`
+- Downloaded corpora under `ppl-corpus/` and `imatrix-corpus/` (only when
+  the corpus was a URL)
 
-## How any llama.cpp build plugs in
+## Pipeline stages
 
-prismaquant-llama works against **any llama.cpp source tree** — mainline
-`ggml-org/llama.cpp` or any fork. The contract is exactly two pieces:
+The `run` subcommand executes 9 stages:
 
-1. **Required**: build `llama-quantize-cost`. The source lives at
-   [`src/pipeline/cpp/quantize-cost/`](src/pipeline/cpp/quantize-cost/)
-   in this repo (a single `.cpp` + `CMakeLists.txt`). Copy that
-   directory into your llama.cpp's `tools/quantize-cost/`, register it
-   in your top-level `tools/CMakeLists.txt` (`add_subdirectory(quantize-cost)`),
-   and rebuild with `-DGGML_BUILD_TOOLS=ON`. The standard
-   `llama-quantize`, `llama-perplexity`, `llama-bench`, and
-   `llama-imatrix` come with any llama.cpp build by default — no
-   patches needed there.
+| Stage | What | Tool |
+|---|---|---|
+| A | Download HF safetensors (if HF id input) | `huggingface_hub` |
+| B | Convert safetensors → BF16 GGUF | `convert_hf_to_gguf.py` (from llama.cpp) |
+| C | Hessian probe (Bayesian sensitivity) | `prismaquant.incremental_probe` |
+| D | imatrix generation | `llama-imatrix` |
+| E | per-(tensor, format) MSE costs | `llama-quantize-cost` |
+| F | bridge HF → GGUF tensor names | bundled script |
+| G | multi-choice knapsack allocation | bundled `allocator.py` |
+| H | apply allocation | `llama-quantize` |
+| I | final PPL eval | `llama-perplexity` |
 
-2. *Optional*: ship `tools/prismaquant/format_metadata_<forkname>.json`
-   describing your fork's weight quants. Without this, fork-specific
-   formats are still discovered automatically (via `<binary> --help`
-   parsing) and heuristic-classified; maintainer-supplied metadata is
-   purely additive polish (curated `recommend` flags + helpful `note`
-   strings).
-
-That's it — no other patches, hooks, or fork modifications. If your
-build's binaries respond to standard `--help` and produce GGUFs, the
-allocator works.
+Each stage is idempotent and caches by file existence. Re-running a model
+with different budget/priority skips A–E and re-runs only F–I (~5–10 min
+on most models).
 
 ## Repo layout
 
 ```
 prismaquant-llama/
-├── src/
-│   ├── prismaquant_llama/         ← Python package (TUI + dispatcher + helpers)
-│   │   ├── cli.py                  unified CLI dispatcher
-│   │   ├── wizard.py               interactive TUI (4 screens)
-│   │   ├── format_discovery.py     parse <binary> --help + metadata overlay
-│   │   ├── format_metadata_base.json  base metadata (mainline + ikllama)
-│   │   ├── calibration.py          empirical bpw / PPL / bench calibration
-│   │   └── paths.py                binary discovery + output dir tree
-│   └── pipeline/                   ← stage helpers invoked by pipeline_runner
-│       ├── scripts/allocator.py            multi-choice knapsack solver
-│       ├── scripts/bridge_probe_to_gguf.py HF→GGUF tensor-name bridge
-│       └── cpp/quantize-cost/              source for llama-quantize-cost (Stage E)
-├── examples/
-│   ├── recipes/                            sample allocator outputs
-│   ├── pinned-tensors-qwen36.json
-│   ├── format-perf-default.json            shipped per-format size/PPL/perf table
-│   ├── format_metadata_ikllama.json        ik_llama IK-K family metadata
-│   ├── default-formats.txt                 personal-default formats list template
-│   └── config.toml                         ~/.prismaquant-llama/config/config.toml template
+├── src/prismaquant_llama/
+│   ├── cli.py                  unified dispatcher
+│   ├── pipeline_runner.py      run subcommand + Stages A–I
+│   ├── calibration.py          calibrate subcommand
+│   ├── config.py               config.toml loader + first-run installer
+│   ├── input_resolver.py       4-way input classification
+│   ├── paths.py                directory layout
+│   ├── data/                   bundled corpora + system.json.default + config.toml.default
+│   ├── scripts/                bundled allocator + bridge
+│   └── cpp/quantize-cost/      C++ source for llama-quantize-cost
 ├── docs/
-│   ├── GETTING-STARTED.md          hands-on tutorial
-│   └── methodology.md              prismaquant methodology + recipe gallery
 ├── pyproject.toml
-└── README.md (this file)
+└── README.md
 ```
-
-## What works today
-
-The `pipeline run` subcommand executes the full A→I sequence (download,
-convert, probe, imatrix, costs, bridge, allocate, quantize, eval) in
-one invocation. Each stage is idempotent and cache-aware — re-runs
-skip completed stages.
-
-```bash
-# Minimal invocation — auto-budget at 25% of BF16, equal-priority
-prismaquant-llama pipeline run \
-    --hf-model google/gemma-4-E4B-it \
-    --binary /path/to/your-fork/build/bin/llama-quantize \
-    --calibration /path/to/wikitext-or-bartowski.txt \
-    --output /path/to/output-root
-```
-
-| Capability | What it gives you |
-|---|---|
-| **Auto-budget** | Default `--budget-gb` derives 25% of the BF16 GGUF size after Stage B (slightly tighter than mainline IQ4_XS at ~28%). Override with explicit `--budget-gb`. |
-| **Equal-weight priority default** | `--priority 333` — neutral PPL/TG/PP weighting. Override with e.g. `522` for PPL-heavy or `252` for prefill-heavy. |
-| **Format auto-discovery** | Parses `<binary> --help` to learn what formats your fork supports. Heuristic-classifies unknown formats (bpw/family/source) so any fork works without metadata files. Curated `format_metadata_base.json` (ships) covers mainline; forks can drop in `format_metadata_<forkname>.json` for polish. |
-| **Convention-path metadata loading** | Forks place metadata at `<binary>/../../tools/prismaquant/format_metadata_*.json` and we pick it up automatically. Works for `frankenturbo2` reference fork. |
-| **Shared BF16 + imatrix caches** | First run pays the convert + imatrix cost; subsequent runs (different budgets/priorities, same model) skip straight to allocate + quantize. ~10-30 min saved per re-run. |
-| **HSA override hook** | Pass `--hsa-override 11.0.2` (or set `[defaults] hsa_override` in `config.toml`) to apply `HSA_OVERRIDE_GFX_VERSION` to all subprocess GPU calls. Useful for emulating gfx1100 on gfx1102/gfx1103. |
-| **Per-stage logs** | `<work>/logs/stage-{A..I}.log` for each run. Pipeline failure points to the right log file in the error message. |
-| **Standalone subcommands** | `discover`, `calibrate quick/deep/ingest`, `paths layout/find-binaries`, `wizard` for users who only want one piece of the workflow. |
-
-### Validated end-to-end on
-
-- `google/gemma-4-E4B-it` (~4B effective, iSWA hybrid — needed our [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant) fork's Gemma-4 patches)
-- `unsloth/gpt-oss-20b-BF16` (~20B MoE — clean DefaultProfile path)
-- `Jackrong/Qwopus3.5-9B-v3.5` (~9B dense; original validation set, 28-row sweep across 3 budgets × 9 priorities)
-
-### TODO
-
-What's still missing for production-readiness:
-
-- [ ] **TUI wrapper** for `pipeline run` (subcommand exists; the 4-screen TUI front-end is still stub)
-- [ ] **Calibration preset paths** — auto-download wikitext-103, c4, the-pile by name (currently user passes a local file path)
-- [ ] **Architecture autodetect** in the TUI — peek at HF `config.json` to surface arch-specific notes (e.g. "this is a hybrid Mamba-2; expect probe to take longer")
-- [ ] **Recipe preview before execute** — show estimated final size + per-tensor format breakdown before Stage H runs
-- [ ] **Per-stage retry + better diagnostics** on transient failures
-- [ ] **prismaquant upstream PRs** — our [`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant) fork carries 8 generic + 1 architecture-specific patch ([`FORK-NOTES.md`](https://github.com/jimbothigpen/prismaquant/blob/main/FORK-NOTES.md)). Generic patches are clean upstream candidates; PRs deferred until prismaquant-llama gets a few weeks of in-use validation
 
 ## License
 
 MIT (see LICENSE).
 
-## Contributing
-
-Issues + PRs welcome. The wizard component is intentionally small (4 screens, 4 modules);
-resist scope creep there. Power users who need anything beyond the 4 dimensions the
-wizard exposes should drive the pipeline directly via `prismaquant-llama pipeline run`
-(see `pipeline run --help` for the full flag set).
-
 ## Relationship to upstream prismaquant
 
 [`RobTand/prismaquant`](https://github.com/RobTand/prismaquant) is the
-canonical Bayesian mixed-precision allocator project; it targets vLLM
-and compressed-tensors. **prismaquant-llama** is a separate
-GGUF/llama.cpp-targeting adapter; we use the upstream allocator's
-mathematical core (the closed-form Δloss surrogate) but the
-runner/bridge/quantize toolchain here is targeted at the GGUF format
-and llama.cpp's quant catalog.
+canonical Bayesian mixed-precision allocator project; it targets vLLM and
+compressed-tensors. **prismaquant-llama** is a separate
+GGUF/llama.cpp-targeting adapter using the upstream allocator's
+mathematical core (the closed-form Δloss surrogate). The
+runner / bridge / quantize toolchain here is GGUF-specific.
