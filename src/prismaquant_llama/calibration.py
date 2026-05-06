@@ -49,6 +49,7 @@ from .config import (Config, load_config, find_tool, subprocess_env,
 from .input_resolver import ResolvedInput, resolve as resolve_input
 from .paths import Layout
 from .pipeline_runner import (download_hf, convert_to_bf16, download_gguf_url,
+                              stage_d_imatrix, _resolve_imatrix_override,
                               cfg_from_args)
 
 
@@ -118,10 +119,14 @@ def _run_cmd(cmd: list[str], env: dict, log_path: Path,
 
 
 def _quantize_one(cfg: Config, src: Path, dst: Path, fmt: str,
-                  log_path: Path) -> bool:
+                  log_path: Path,
+                  imatrix: Optional[Path] = None) -> bool:
     bin_ = find_tool(cfg, "llama-quantize")
-    rc, _ = _run_cmd([str(bin_), str(src), str(dst), fmt],
-                     subprocess_env(cfg), log_path)
+    cmd = [str(bin_)]
+    if imatrix is not None:
+        cmd += ["--imatrix", str(imatrix)]
+    cmd += [str(src), str(dst), fmt]
+    rc, _ = _run_cmd(cmd, subprocess_env(cfg), log_path)
     return rc == 0 and dst.exists()
 
 
@@ -260,7 +265,9 @@ def _load_existing(output_path: Path) -> dict[str, FormatMeasurement]:
 
 def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
                        ppl_corpus: Path, layout: Layout, output_path: Path,
-                       model_name: str) -> dict[str, FormatMeasurement]:
+                       model_name: str,
+                       imatrix: Optional[Path] = None,
+                       ) -> dict[str, FormatMeasurement]:
     """Run quantize → perplexity → bench for each format. Persists the perf
     JSON after every format so a kill mid-sweep preserves progress, and on
     re-entry skips formats already measured to completion.
@@ -310,7 +317,8 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
         else:
             _log(meta_log, f"   quantize → {scratch.name}  (live: {fmt_log.name})")
             t0 = time.time()
-            if not _quantize_one(cfg, ref_gguf, scratch, fmt, fmt_log):
+            if not _quantize_one(cfg, ref_gguf, scratch, fmt, fmt_log,
+                                  imatrix=imatrix):
                 m.error = "quantize failed"
                 results[fmt] = m
                 _write_perf_json(output_path, results, model_name, cfg.ppl_chunks)
@@ -399,7 +407,8 @@ def _write_perf_json(output: Path, results: dict[str, FormatMeasurement],
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
-                  purge: str) -> Path:
+                  purge: str,
+                  imatrix_override: Optional[str] = None) -> Path:
     """Run calibration. mode ∈ {'system', 'model'}.
 
     Returns path to the written perf JSON."""
@@ -414,7 +423,9 @@ def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
     print()
 
     ppl_corpus, ppl_was_downloaded = resolve_corpus(cfg, "ppl")
-    print(f"[calibrate] ppl_corpus: {ppl_corpus}")
+    imatrix_corpus, imatrix_was_downloaded = resolve_corpus(cfg, "imatrix")
+    print(f"[calibrate] ppl_corpus:     {ppl_corpus}")
+    print(f"[calibrate] imatrix_corpus: {imatrix_corpus}")
 
     # Compute the output path BEFORE running so resume can find a prior
     # partial JSON if a previous calibration of this model+mode crashed.
@@ -425,10 +436,21 @@ def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
 
     ref_gguf = _prepare_reference_gguf(cfg, layout, resolved)
 
+    # imatrix: explicit override > generate from imatrix_corpus.
+    # i-quants and IK-family quants are designed around imatrix-weighted
+    # quantization; calibrating without one would systematically penalize
+    # those formats vs K-quants and bias the allocator's ranking.
+    if imatrix_override:
+        imatrix_path = _resolve_imatrix_override(cfg, layout, imatrix_override)
+        print(f"[calibrate] using --imatrix override: {imatrix_path}")
+    else:
+        imatrix_path = stage_d_imatrix(cfg, layout, ref_gguf, imatrix_corpus)
+
     with tempfile.TemporaryDirectory(prefix="pq-cal-",
                                      dir=str(layout.work)) as tmp:
         _calibrate_formats(cfg, ref_gguf, Path(tmp), ppl_corpus,
-                           layout, output, resolved.model_name)
+                           layout, output, resolved.model_name,
+                           imatrix=imatrix_path)
 
     print(f"\n[calibrate] perf JSON written → {output}")
 
@@ -484,6 +506,16 @@ def add_calibrate_args(p: argparse.ArgumentParser) -> None:
                    help="comma-separated quants list (default: from config)")
     p.add_argument("--ppl-corpus", default=None)
     p.add_argument("--ppl-chunks", type=int, default=None)
+    p.add_argument("--imatrix-corpus", default=None,
+                   help="imatrix corpus path or URL (default: from config). "
+                        "Used to generate the imatrix file consumed by "
+                        "llama-quantize during calibration; without it, "
+                        "i-quants and IK-family quants are penalized.")
+    p.add_argument("--imatrix-chunks", type=int, default=None,
+                   help="chunks for llama-imatrix (default: from config)")
+    p.add_argument("--imatrix", default=None,
+                   help="existing imatrix file path or URL (overrides "
+                        "imatrix generation)")
     p.add_argument("--convert-script", type=Path, default=None,
                    help="path to convert_hf_to_gguf.py (default: from config "
                         "or auto-discover; only relevant when input is "
@@ -503,13 +535,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Fill missing run-only flags with defaults so cfg_from_args is happy.
     args.budget = None
     args.priority = None
-    args.imatrix_corpus = None
-    args.imatrix_chunks = None
     cfg = cfg_from_args(args)
 
     resolved = resolve_input(args.input, allow_gguf=True)
     try:
-        run_calibrate(cfg, args.mode, resolved, args.purge)
+        run_calibrate(cfg, args.mode, resolved, args.purge,
+                      imatrix_override=args.imatrix)
         return 0
     except (SystemExit, FileNotFoundError, ValueError) as e:
         print(f"\nFAIL: {e}", file=sys.stderr)
