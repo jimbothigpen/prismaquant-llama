@@ -251,11 +251,25 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
 
 def stage_e_costs(cfg: Config, layout: Layout, bf16_path: Path,
                   imatrix_path: Path) -> Path:
-    """Stage E — per-(tensor, format) MSE measurement."""
-    costs = layout.costs_dir / "costs.csv"
+    """Stage E — per-(tensor, format) MSE measurement.
+
+    Resume-safe: the output costs.csv is content-addressed under
+    `_shared/costs-cache/` keyed by (bf16_sha, imatrix_sha, formats_hash).
+    Existing cache hits skip the multi-hour measurement. Cache misses
+    write to a `.tmp` path and atomically rename on rc=0, so a killed
+    Stage E never leaves a partial CSV that a future run might mistake
+    for a complete one.
+    """
+    bf16_sha = _file_sha256(bf16_path)
+    imatrix_sha = _file_sha256(imatrix_path)
+    import hashlib as _hashlib
+    formats_hash = _hashlib.sha256(",".join(cfg.quants).encode()).hexdigest()
+    costs = layout.costs_cache_path(bf16_sha, imatrix_sha, formats_hash)
+
     if costs.exists():
         _log(layout, "E", f"E. costs.csv cached at {costs} (skip)")
         return costs
+
     cost_bin = find_tool(cfg, "llama-quantize-cost")
     exemplars = _auto_pick_exemplars(bf16_path)
     top_level = _discover_top_level_weights(bf16_path)
@@ -265,16 +279,28 @@ def stage_e_costs(cfg: Config, layout: Layout, bf16_path: Path,
     _log(layout, "E", f"E. measuring per-(tensor, format) MSE → {costs}")
     _log(layout, "E", f"E. top-level weights: {top_level}")
     _log(layout, "E", f"E. exemplar layers: {exemplars}")
+
+    # Atomic write: quantize-cost emits to .tmp, rename on success.
+    costs.parent.mkdir(parents=True, exist_ok=True)
+    tmp = costs.with_suffix(".csv.tmp")
+    if tmp.exists():
+        # Stale tmp from a prior killed run — unlink so we don't accidentally
+        # treat partial output as cached.
+        tmp.unlink()
+
     rc = _run([str(cost_bin),
                "--model", str(bf16_path),
                "--types", ",".join(cfg.quants),
                "--imatrix", str(imatrix_path),
                "--include-regex", include_regex,
-               "--output", str(costs)],
+               "--output", str(tmp)],
               layout.logs_dir / "stage-E.log",
               env=subprocess_env(cfg))
-    if rc != 0 or not costs.exists():
+    if rc != 0 or not tmp.exists():
+        # Clean up partial tmp before failing so a re-run starts fresh.
+        tmp.unlink(missing_ok=True)
         raise SystemExit(f"FAIL: E llama-quantize-cost exit={rc}")
+    tmp.rename(costs)
     _log(layout, "E", f"E. costs.csv rows: {sum(1 for _ in costs.open())}")
     return costs
 
@@ -475,6 +501,7 @@ class PurgeContext:
     imatrix_was_downloaded: bool
     ppl_corpus_local: Path
     imatrix_corpus_local: Path
+    costs_path: Optional[Path] = None          # tracked output of Stage E
 
 
 def cleanup(layout: Layout, resolved: ResolvedInput, ctx: PurgeContext,
@@ -505,6 +532,8 @@ def cleanup(layout: Layout, resolved: ResolvedInput, ctx: PurgeContext,
             _rm(p, "probe")
         for p in layout.imatrix_cache.glob(f"{resolved.model_name}*"):
             _rm(p, "imatrix")
+        if ctx.costs_path is not None:
+            _rm(ctx.costs_path, "costs")
 
     if ctx.ppl_was_downloaded:
         _rm(ctx.ppl_corpus_local, "ppl-corpus")
@@ -572,6 +601,7 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
 
     # E–H
     costs_path = stage_e_costs(cfg, layout, bf16_path, imatrix_path)
+    purge_ctx.costs_path = costs_path     # for --purge yes cleanup of shared cache
     bridge_path = stage_f_bridge(cfg, layout, probe_path)
     perf_file = find_perf_file(layout, resolved.model_name)
     recipe_path = stage_g_allocate(cfg, layout, bridge_path, costs_path,

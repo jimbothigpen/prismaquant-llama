@@ -9,6 +9,8 @@ Layout under cfg.base:
     │   ├── bf16/                 BF16 GGUFs (one per model)
     │   ├── gguf-cache/           GGUFs downloaded from URL (calibrate)
     │   ├── imatrix-cache/        imatrix files (one per model+corpus+chunks)
+    │   ├── costs-cache/          per-(tensor, format) MSE measurements
+    │   │                         (one per BF16+imatrix+formats tuple)
     │   └── probe/                prismaquant Hessian probe artifacts
     ├── ppl-corpus/               downloaded PPL corpora (purge candidates)
     ├── imatrix-corpus/           downloaded imatrix corpora (purge candidates)
@@ -37,6 +39,7 @@ class Layout:
     bf16_dir: Path
     gguf_cache: Path
     imatrix_cache: Path
+    costs_cache: Path
     probe_dir: Path
     ppl_corpus_dir: Path
     imatrix_corpus_dir: Path
@@ -64,6 +67,7 @@ class Layout:
             bf16_dir=shared / "bf16",
             gguf_cache=shared / "gguf-cache",
             imatrix_cache=shared / "imatrix-cache",
+            costs_cache=shared / "costs-cache",
             probe_dir=shared / "probe",
             ppl_corpus_dir=base / "ppl-corpus",
             imatrix_corpus_dir=base / "imatrix-corpus",
@@ -79,7 +83,8 @@ class Layout:
 
     def make(self) -> None:
         for d in (self.base, self.shared, self.hf_cache, self.bf16_dir,
-                  self.gguf_cache, self.imatrix_cache, self.probe_dir,
+                  self.gguf_cache, self.imatrix_cache, self.costs_cache,
+                  self.probe_dir,
                   self.ppl_corpus_dir, self.imatrix_corpus_dir,
                   self.calibration_dir, self.calibration_models_dir,
                   self.ggufs, self.work, self.costs_dir,
@@ -89,6 +94,13 @@ class Layout:
     def imatrix_cache_path(self, model_sha: str, corpus_sha: str, chunks: int) -> Path:
         key = f"{model_sha[:12]}__{corpus_sha[:12]}__c{chunks}.imatrix.gguf"
         return self.imatrix_cache / key
+
+    def costs_cache_path(self, bf16_sha: str, imatrix_sha: str,
+                         formats_hash: str) -> Path:
+        """Shared cache key for a costs.csv. Stable across runs that share
+        (BF16 model, imatrix file, formats list)."""
+        key = f"{bf16_sha[:12]}__{imatrix_sha[:12]}__{formats_hash[:8]}.costs.csv"
+        return self.costs_cache / key
 
     def gguf_output_path(self, model_name: str, budget_pct: int,
                          priority: str) -> Path:
