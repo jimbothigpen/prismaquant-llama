@@ -8,7 +8,8 @@ version = "0.2.0a1"
 description = "Bring prismaquant's Bayesian per-tensor mixed-precision allocation to llama.cpp / GGUF — adapts the prismaquant allocator (originally targeted at vLLM) to work with any prismaquant-enabled fork of llama.cpp via a CLI."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Jeremy Jones", email = "jeremy@myfacetwittertube.com"},
 ]
@@ -17,7 +18,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
