@@ -115,7 +115,31 @@ That file is heavily commented; open it and tune to taste.
 prismaquant-llama run unsloth/gemma-3-4b-it
 ```
 
-That's the whole minimal command. Defaults applied:
+That's the whole minimal command. Before any heavy work starts, you'll
+see a pre-flight estimate and an accept/abort prompt:
+
+```
+┌─ prismaquant-llama run ─ gemma-3-4b-it ────
+│ Budget:    25% of BF16    Priority: 111
+│ Formats:   12    imatrix_chunks: 50    ppl_chunks: 50
+│
+│ Estimated disk:
+│   source / HF download:   ~9.3 GB
+│   BF16 GGUF:              ~9.8 GB
+│   final PQ GGUF:          ~2.4 GB
+│   peak during pipeline:   ~21.5 GB
+│
+│ Estimated wall time:    23m–58m  (rough)
+│
+│ Free disk:              ~48.2 GB
+└─────────────────────────────────────────────
+Proceed? [y/N]
+```
+
+Type `y` to proceed, anything else (or just hit return) to abort.
+For scripted use, pass `--yes` to skip the prompt.
+
+Defaults applied (visible in the estimate block):
 
 | Default | Value |
 |---|---|
@@ -371,6 +395,7 @@ prismaquant-llama run INPUT \
     [--imatrix-chunks N]         # default: from config
     [--convert-script PATH]      # convert_hf_to_gguf.py location (default: auto-discover)
     [--purge {yes,no}]           # default: yes
+    [--yes | -y]                 # skip the pre-flight confirmation prompt
 ```
 
 ### Useful flags (calibrate subcommand)
@@ -389,7 +414,21 @@ prismaquant-llama calibrate {system|model} INPUT \
     [--imatrix-chunks N]         # default: from config
     [--convert-script PATH]      # convert_hf_to_gguf.py location (default: auto-discover)
     [--purge {yes,no}]           # default: yes
+    [--yes | -y]                 # skip the pre-flight confirmation prompt
 ```
+
+### Pre-flight prompt
+
+Both subcommands show an estimate of disk usage and wall-time range
+before doing any heavy work, and prompt `Proceed? [y/N]`. Default is
+N — you have to actively confirm. Use `--yes` (or `-y`) to skip the
+prompt; this is required for any non-interactive / scripted use,
+otherwise the command exits with an error on non-TTY stdin.
+
+The estimate uses HF API to query weight sizes for HF-id inputs;
+on-disk inputs scan locally. If HF is unreachable, the source-size
+field shows `(unknown — HF API unreachable?)` but the estimate
+continues with what's known.
 
 ### Troubleshooting
 

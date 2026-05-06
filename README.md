@@ -166,6 +166,18 @@ These work on both `run` and `calibrate`:
   convert-script location. Auto-discovery looks two levels up from
   `path` and next to the binary; set this if your install puts the
   script elsewhere.
+- `--yes` / `-y` skips the pre-flight disk + time confirmation prompt.
+  Required for non-interactive / scripted use; without it on a
+  non-TTY shell the command exits with an error.
+
+### Pre-flight estimate
+
+Before any heavy work begins, both subcommands print a summary block
+showing the model, formats list, estimated disk usage at peak, free
+disk available, and a rough wall-time range. Then they prompt
+`Proceed? [y/N]`. Default is **N** — you have to actively confirm.
+The estimate is also useful as a sanity check that you're about to run
+what you intended (correct model, correct budget, correct quants list).
 
 ## Configuration
 

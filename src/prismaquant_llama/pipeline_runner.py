@@ -493,6 +493,215 @@ def find_perf_file(layout: Layout, model_name: str) -> Optional[Path]:
 # Cleanup
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-flight estimate + accept/abort prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Estimate:
+    """Disk + time estimate, formatted for the accept/abort prompt."""
+    label: str                              # "run" or "calibrate system" etc.
+    model_name: str
+    n_formats: int
+    source_size: Optional[int] = None       # bytes; None if unknown
+    bf16_size: Optional[int] = None
+    final_size: Optional[int] = None
+    peak: Optional[int] = None
+    free_disk: int = 0
+    time_low_min: int = 0
+    time_high_min: int = 0
+    source_cached: bool = False
+    bf16_cached: bool = False
+    budget: Optional[int] = None
+    priority: Optional[str] = None
+    chunks_imatrix: int = 0
+    chunks_ppl: int = 0
+
+
+def _free_disk_at(path: Path) -> int:
+    p = Path(path).expanduser().resolve()
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return shutil.disk_usage(p).free
+
+
+def _hf_weight_size(hf_id: str) -> Optional[int]:
+    """Query HF for the total weight bytes. Returns None on any failure."""
+    try:
+        from huggingface_hub import HfApi
+        info = HfApi().model_info(repo_id=hf_id, files_metadata=True)
+    except Exception:
+        return None
+    weight_exts = (".safetensors", ".bin", ".gguf", ".pt", ".pth", ".npz", ".h5")
+    return sum((s.size or 0) for s in (info.siblings or [])
+               if s.rfilename.endswith(weight_exts) and (s.size or 0) > 0)
+
+
+def _source_size_and_cached(resolved: "ResolvedInput",
+                             layout: Layout) -> tuple[Optional[int], bool]:
+    if resolved.kind == "hf":
+        cache_dir = layout.hf_cache / resolved.model_name
+        if (cache_dir / ".download.complete").exists():
+            size = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file())
+            return size, True
+        return _hf_weight_size(resolved.hf_id), False
+    if resolved.kind == "safetensors_dir":
+        size = sum(f.stat().st_size
+                   for f in resolved.safetensors_dir.glob("*.safetensors"))
+        return size, True
+    if resolved.kind == "gguf_local":
+        return resolved.gguf_path.stat().st_size, True
+    if resolved.kind == "gguf_url":
+        return None, False
+    return None, False
+
+
+def _estimate_run_minutes(bf16_gb: float) -> tuple[int, int]:
+    """Rough wall-time range for the full A→I pipeline. Empirical scaling
+    from observed runs: 4B → ~15-35 min, 9B → ~30-60 min, 35B → ~90-180 min."""
+    if bf16_gb <= 0:
+        return 30, 240
+    return max(15, int(8 + bf16_gb * 1.2)), max(45, int(20 + bf16_gb * 4))
+
+
+def _estimate_calibrate_minutes(bf16_gb: float, n_formats: int) -> tuple[int, int]:
+    """Rough range. Per format: 5-15 min on a 4B model, scales with size."""
+    if bf16_gb <= 0:
+        return max(60, n_formats * 5), max(180, n_formats * 15)
+    low = 5 + n_formats * max(3, int(3 + bf16_gb * 0.3))
+    high = 10 + n_formats * max(8, int(6 + bf16_gb * 0.8))
+    return low, high
+
+
+def estimate_run(cfg: Config, resolved: "ResolvedInput",
+                 layout: Layout) -> Estimate:
+    src_size, src_cached = _source_size_and_cached(resolved, layout)
+    bf16_path = layout.bf16_dir / f"{resolved.model_name}-BF16.gguf"
+    bf16_cached = bf16_path.exists()
+    bf16_size = (bf16_path.stat().st_size if bf16_cached
+                 else int((src_size or 0) * 1.05) or None)
+    final_size = (int(bf16_size * cfg.budget / 100) if bf16_size else None)
+    peak = ((0 if src_cached else (src_size or 0))
+            + (0 if bf16_cached else (bf16_size or 0))
+            + (final_size or 0) + 50 * 1024**2)  # +50MB for probe/imatrix/costs/recipe
+    free = _free_disk_at(cfg.base)
+    bf16_gb = (bf16_size / 1024**3) if bf16_size else 0
+    low, high = _estimate_run_minutes(bf16_gb)
+    return Estimate(
+        label="run", model_name=resolved.model_name, n_formats=len(cfg.quants),
+        source_size=src_size, bf16_size=bf16_size, final_size=final_size,
+        peak=peak if peak > 0 else None, free_disk=free,
+        time_low_min=low, time_high_min=high,
+        source_cached=src_cached, bf16_cached=bf16_cached,
+        budget=cfg.budget, priority=cfg.priority,
+        chunks_imatrix=cfg.imatrix_chunks, chunks_ppl=cfg.ppl_chunks,
+    )
+
+
+def estimate_calibrate(cfg: Config, mode: str, resolved: "ResolvedInput",
+                       layout: Layout) -> Estimate:
+    src_size, src_cached = _source_size_and_cached(resolved, layout)
+    bf16_path = layout.bf16_dir / f"{resolved.model_name}-BF16.gguf"
+    bf16_cached = bf16_path.exists()
+    if resolved.kind == "gguf_local":
+        bf16_size = src_size  # input GGUF IS the reference
+    elif resolved.kind == "gguf_url":
+        bf16_size = src_size  # whatever the URL points at
+    else:
+        bf16_size = (bf16_path.stat().st_size if bf16_cached
+                     else int((src_size or 0) * 1.05) or None)
+    # Calibration scratch: only ONE per-format GGUF on disk at a time.
+    # Q8_0 (~8.5 bpw) is the largest non-16bpw format; ~bf16/1.9.
+    biggest_scratch = (bf16_size // 2) if bf16_size else 0
+    needs_convert = resolved.kind in ("hf", "safetensors_dir")
+    peak = ((0 if src_cached else (src_size or 0))
+            + ((0 if bf16_cached else (bf16_size or 0)) if needs_convert else 0)
+            + biggest_scratch + 50 * 1024**2)
+    free = _free_disk_at(cfg.base)
+    bf16_gb = (bf16_size / 1024**3) if bf16_size else 0
+    low, high = _estimate_calibrate_minutes(bf16_gb, len(cfg.quants))
+    return Estimate(
+        label=f"calibrate {mode}", model_name=resolved.model_name,
+        n_formats=len(cfg.quants),
+        source_size=src_size, bf16_size=bf16_size, final_size=None,
+        peak=peak if peak > 0 else None, free_disk=free,
+        time_low_min=low, time_high_min=high,
+        source_cached=src_cached, bf16_cached=bf16_cached,
+        chunks_imatrix=cfg.imatrix_chunks, chunks_ppl=cfg.ppl_chunks,
+    )
+
+
+def _fmt_bytes(b: Optional[int]) -> str:
+    if b is None:
+        return "(unknown — HF API unreachable?)"
+    if b == 0:
+        return "negligible"
+    if b >= 1024**3:
+        return f"~{b/1024**3:.1f} GB"
+    if b >= 1024**2:
+        return f"~{b/1024**2:.0f} MB"
+    if b >= 1024:
+        return f"~{b/1024:.0f} KB"
+    return f"~{b} B"
+
+
+def _fmt_time_range(low_m: int, high_m: int) -> str:
+    def fmt(m: int) -> str:
+        if m < 60:
+            return f"{m}m"
+        h = m / 60
+        return f"{h:.1f}h" if h < 10 else f"{int(h)}h"
+    return f"{fmt(low_m)}–{fmt(high_m)}"
+
+
+def confirm_or_abort(est: Estimate, assume_yes: bool) -> bool:
+    """Print the estimate + prompt y/N. Returns True to proceed."""
+    print()
+    print("┌─ prismaquant-llama " + est.label
+          + " ─ " + est.model_name + " " + "─" * 4)
+    if est.budget is not None:
+        print(f"│ Budget:    {est.budget}% of BF16    Priority: {est.priority}")
+    print(f"│ Formats:   {est.n_formats}    "
+          f"imatrix_chunks: {est.chunks_imatrix}    "
+          f"ppl_chunks: {est.chunks_ppl}")
+    print(f"│")
+    print(f"│ Estimated disk:")
+    src_tag = " (cached)" if est.source_cached else ""
+    bf16_tag = " (cached)" if est.bf16_cached else ""
+    print(f"│   source / HF download:   {_fmt_bytes(est.source_size)}{src_tag}")
+    print(f"│   BF16 GGUF:              {_fmt_bytes(est.bf16_size)}{bf16_tag}")
+    if est.final_size is not None:
+        print(f"│   final PQ GGUF:          {_fmt_bytes(est.final_size)}")
+    if est.peak is not None:
+        print(f"│   peak during pipeline:   {_fmt_bytes(est.peak)}")
+    print(f"│")
+    print(f"│ Estimated wall time:    {_fmt_time_range(est.time_low_min, est.time_high_min)}  (rough)")
+    print(f"│")
+    print(f"│ Free disk:              {_fmt_bytes(est.free_disk)}")
+    if (est.peak is not None and est.free_disk
+            and est.peak > est.free_disk):
+        short = est.peak - est.free_disk
+        print(f"│   ⚠ INSUFFICIENT — short by {_fmt_bytes(short)} at peak")
+    print("└" + "─" * 60)
+
+    if assume_yes:
+        print("[--yes] proceeding without prompt")
+        return True
+    if not sys.stdin.isatty():
+        print("ERROR: non-interactive shell; pass --yes to proceed.",
+              file=sys.stderr)
+        return False
+    try:
+        response = input("Proceed? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if response in ("y", "yes"):
+        return True
+    print("aborted.")
+    return False
+
+
 @dataclass
 class PurgeContext:
     """Tracks artifacts to clean up at end of run if --purge yes."""
@@ -549,11 +758,19 @@ def cleanup(layout: Layout, resolved: ResolvedInput, ctx: PurgeContext,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_pipeline(cfg: Config, resolved: ResolvedInput,
-                 imatrix_override: Optional[str], purge: str) -> Path:
-    """Execute the full A→I pipeline. Returns path to the final GGUF."""
+                 imatrix_override: Optional[str], purge: str,
+                 assume_yes: bool = False) -> Optional[Path]:
+    """Execute the full A→I pipeline. Returns path to the final GGUF, or
+    None if the user aborted at the pre-flight prompt."""
     layout = Layout.for_run(base=cfg.base, model_name=resolved.model_name)
-    layout.make()
 
+    # Pre-flight estimate + accept/abort. Layout is constructed but not
+    # mkdir'd yet, so an aborted invocation leaves no traces.
+    est = estimate_run(cfg, resolved, layout)
+    if not confirm_or_abort(est, assume_yes=assume_yes):
+        return None
+
+    layout.make()
     print("=" * 70)
     print(f"prismaquant-llama run — {layout.run_label}")
     print("=" * 70)
@@ -687,6 +904,9 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--purge", choices=("yes", "no"), default="yes",
                    help="clean up downloaded/generated artifacts at end "
                         "(default: yes; never deletes user-supplied on-disk inputs)")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="skip the pre-flight disk + time confirmation prompt "
+                        "(required for non-interactive / scripted use)")
 
 
 def cfg_from_args(args) -> Config:
@@ -723,8 +943,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = cfg_from_args(args)
     resolved = resolve_input(args.input, allow_gguf=False)
     try:
-        run_pipeline(cfg, resolved, args.imatrix, args.purge)
-        return 0
+        result = run_pipeline(cfg, resolved, args.imatrix, args.purge,
+                               assume_yes=args.yes)
+        return 0 if result is not None else 1
     except (SystemExit, FileNotFoundError, ValueError) as e:
         print(f"\nFAIL: {e}", file=sys.stderr)
         return 1

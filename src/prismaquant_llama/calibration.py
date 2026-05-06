@@ -50,7 +50,8 @@ from .input_resolver import ResolvedInput, resolve as resolve_input
 from .paths import Layout
 from .pipeline_runner import (download_hf, convert_to_bf16, download_gguf_url,
                               stage_d_imatrix, _resolve_imatrix_override,
-                              cfg_from_args)
+                              cfg_from_args,
+                              estimate_calibrate, confirm_or_abort)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -408,11 +409,19 @@ def _write_perf_json(output: Path, results: dict[str, FormatMeasurement],
 
 def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
                   purge: str,
-                  imatrix_override: Optional[str] = None) -> Path:
+                  imatrix_override: Optional[str] = None,
+                  assume_yes: bool = False) -> Optional[Path]:
     """Run calibration. mode ∈ {'system', 'model'}.
 
-    Returns path to the written perf JSON."""
+    Returns path to the written perf JSON, or None if the user aborted
+    at the pre-flight prompt."""
     layout = Layout.for_run(base=cfg.base, model_name=resolved.model_name)
+
+    # Pre-flight estimate + accept/abort.
+    est = estimate_calibrate(cfg, mode, resolved, layout)
+    if not confirm_or_abort(est, assume_yes=assume_yes):
+        return None
+
     layout.make()
 
     print("=" * 70)
@@ -523,6 +532,9 @@ def add_calibrate_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--purge", choices=("yes", "no"), default="yes",
                    help="clean up downloaded/generated artifacts after "
                         "(default: yes; never deletes user-supplied on-disk inputs)")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="skip the pre-flight disk + time confirmation prompt "
+                        "(required for non-interactive / scripted use)")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -539,9 +551,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     resolved = resolve_input(args.input, allow_gguf=True)
     try:
-        run_calibrate(cfg, args.mode, resolved, args.purge,
-                      imatrix_override=args.imatrix)
-        return 0
+        result = run_calibrate(cfg, args.mode, resolved, args.purge,
+                                imatrix_override=args.imatrix,
+                                assume_yes=args.yes)
+        return 0 if result is not None else 1
     except (SystemExit, FileNotFoundError, ValueError) as e:
         print(f"\nFAIL: {e}", file=sys.stderr)
         return 1
