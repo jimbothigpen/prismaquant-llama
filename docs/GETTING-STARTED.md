@@ -84,7 +84,7 @@ K-quant at equal PPL, OR equal size at noticeably better PPL.
 
 Look for `model.safetensors` / `model-00001-of-N.safetensors` files in the
 HF "Files and versions" tab. Gated models (Llama, Gemma, etc.):
-`huggingface-cli login` once and accept the license in your browser first.
+`hf auth login` once and accept the license in your browser first.
 
 ---
 

@@ -36,6 +36,17 @@ def _print_help() -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
 
+    # First-run bootstrap: drop the starter config at the standard path
+    # so even `prismaquant-llama run --help` triggers the install. Skip if
+    # the user is explicitly pointing at an alternative via --config.
+    if "--config" not in argv:
+        from .config import install_default_config, DEFAULT_CONFIG_PATH
+        if install_default_config():
+            print(f"[prismaquant-llama] wrote starter config → {DEFAULT_CONFIG_PATH}",
+                  file=sys.stderr)
+            print(f"[prismaquant-llama] edit it to set defaults; CLI flags "
+                  f"override per run.", file=sys.stderr)
+
     if not argv or argv[0] in ("-h", "--help", "help"):
         _print_help()
         return 0
