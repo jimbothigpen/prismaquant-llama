@@ -76,6 +76,15 @@ path = ""
 # PPL cliff on most architectures. Add them back here if you specifically
 # want extreme compression.
 #
+# BF16 is included so the allocator has a full-precision option for the most
+# sensitivity-critical tensors when budget allows. At 25% budget it's never
+# picked (4× too expensive); at higher budgets (50%+) it becomes a real
+# quality knob.
+#
+# If you run MoE models (gpt-oss, Qwen-MoE, Mixtral, etc.), append
+# "MXFP4_MOE" — mainline-supported FP4 micro-scaled format for MoE expert
+# tensors specifically.
+#
 # Override per-run with `--quants Q4_K,Q5_K,...`.
 # ──────────────────────────────────────────────────────────────────────────────
 quants = [
@@ -86,8 +95,10 @@ quants = [
     "Q8_0",
     "IQ3_XXS",
     "IQ3_S",
+    "IQ3_M",
     "IQ4_XS",
     "IQ4_NL",
+    "BF16",
 ]
 
 

@@ -162,7 +162,7 @@ prismaquant-llama run unsloth/gemma-3-4b-it --budget 30 --priority 522
 base           = "~/.prismaquant-llama/"
 path           = ""
 quants         = ["Q3_K","Q4_K","Q5_K","Q6_K","Q8_0",
-                  "IQ3_XXS","IQ3_S","IQ4_XS","IQ4_NL"]
+                  "IQ3_XXS","IQ3_S","IQ3_M","IQ4_XS","IQ4_NL","BF16"]
 budget         = 25
 priority       = "111"
 ppl_corpus     = ""
