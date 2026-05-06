@@ -94,6 +94,7 @@ quants = [
     "Q6_K",
     "Q8_0",
     "IQ3_XXS",
+    "IQ3_XS",
     "IQ3_S",
     "IQ3_M",
     "IQ4_XS",

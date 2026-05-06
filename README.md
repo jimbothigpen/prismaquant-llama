@@ -157,7 +157,8 @@ section, flat keys, fully commented:
 base           = "~/.prismaquant-llama/"
 path           = ""                                # empty = $PATH
 quants         = ["Q3_K","Q4_K","Q5_K","Q6_K","Q8_0",
-                  "IQ3_XXS","IQ3_S","IQ3_M","IQ4_XS","IQ4_NL","BF16"]
+                  "IQ3_XXS","IQ3_XS","IQ3_S","IQ3_M",
+                  "IQ4_XS","IQ4_NL","BF16"]
 budget         = 25                                # % of BF16
 priority       = "111"                             # PPL/TG/PP, each 0–9
 ppl_corpus     = ""                                # empty = bundled wikitext
