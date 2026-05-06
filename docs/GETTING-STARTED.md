@@ -297,10 +297,10 @@ tail -f ~/.prismaquant-llama/work/Qwen3-8B-*/logs/calibrate-Q4_K.log
 for ranking adjacent K-quants. Bump to 200 if you care about precise
 PPL-Δ values.
 
-### Per-model calibration (rare)
+### Per-model calibration
 
-If a specific model behaves unusually under quantization, run a model-
-specific calibration that overrides the system default for that model:
+For production builds where you want the allocator to use measurements
+specific to your target model, run a model-tier calibration:
 
 ```bash
 prismaquant-llama calibrate model unsloth/gemma-3-4b-it
@@ -309,6 +309,24 @@ prismaquant-llama calibrate model unsloth/gemma-3-4b-it
 
 The pipeline picks model > system > shipped, so a per-model file always
 wins.
+
+**One-shot calibrate + run.** If you're building a production GGUF for a
+model and want both phases in one command, `run` takes a `--calibrate`
+flag:
+
+```bash
+prismaquant-llama run unsloth/gemma-3-4b-it --calibrate
+```
+
+This runs `calibrate model` first, then proceeds into the pipeline.
+Stages A/B/D are shared so there's no duplicated work. Auto-skipped
+when a complete model calibration already exists, so re-running the same
+model with different `--budget` or `--priority` is fast (cache-hit on
+the model.json from the first invocation).
+
+`--calibrate-chunks N` decouples the calibration's `ppl_chunks` from the
+run's Stage I `--ppl-chunks` — handy for high-fidelity measurements
+during calibration with a fast eval at the end.
 
 ---
 
@@ -396,6 +414,8 @@ prismaquant-llama run INPUT \
     [--convert-script PATH]      # convert_hf_to_gguf.py location (default: auto-discover)
     [--purge {yes,no}]           # default: yes
     [--yes | -y]                 # skip the pre-flight confirmation prompt
+    [--calibrate]                # run `calibrate model` first (no-op if cached)
+    [--calibrate-chunks N]       # override ppl_chunks for calibration only
 ```
 
 ### Useful flags (calibrate subcommand)

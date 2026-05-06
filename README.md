@@ -112,6 +112,30 @@ prismaquant-llama run unsloth/gemma-3-4b-it \
 For persistent overrides, edit `~/.prismaquant-llama/config.toml`. The
 shipped default is heavily commented and explains every key.
 
+#### One-shot model calibration + run
+
+For production builds where you want the allocator to use model-specific
+perf data, pass `--calibrate` to `run`:
+
+```bash
+prismaquant-llama run unsloth/gemma-3-4b-it --calibrate
+```
+
+This runs `calibrate model` against the input first (writing
+`calibration/models/<name>.json`), then proceeds straight into the
+pipeline. Stages A (download), B (convert), and D (imatrix) are
+shared between the two phases, so there's no duplicated work — the
+extra cost is just the per-format quantize+PPL+bench loop.
+
+`--calibrate` is automatically a no-op when a complete model
+calibration already exists for the configured `quants` list, so re-runs
+of the same model with different budget/priority cache-hit cleanly.
+
+`--calibrate-chunks N` overrides `ppl_chunks` for the calibration
+step only — useful if you want high-fidelity measurements during
+calibration but a fast Stage I eval at the end (e.g. `--calibrate-chunks
+200 --ppl-chunks 50`).
+
 ### `calibrate` — measure per-format perf
 
 `calibrate system` builds the system-wide perf table the allocator

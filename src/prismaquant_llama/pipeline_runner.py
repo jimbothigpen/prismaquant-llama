@@ -26,7 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from pathlib import Path
 from typing import Optional
 
@@ -475,6 +475,53 @@ def _discover_top_level_weights(bf16_path: Path) -> list[str]:
 # Perf-file resolution (model > system > shipped default)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_complete_for_quants(perf_json_path: Path, quants: list[str]) -> bool:
+    """Check whether a perf JSON has complete measurements for every format
+    in `quants`. Used by `run --calibrate` to decide whether the cached
+    model.json is sufficient or the calibration step needs to run."""
+    if not perf_json_path.exists():
+        return False
+    try:
+        data = json.loads(perf_json_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    for q in quants:
+        entry = data.get(q)
+        if not isinstance(entry, dict):
+            return False
+        if entry.get("error"):
+            return False
+        # Same completeness check as calibration._is_complete:
+        if not all(entry.get(k) is not None for k in ("bpw", "ppl", "pp", "tg")):
+            return False
+    return True
+
+
+def _compose_run_with_calibrate(run_est: "Estimate",
+                                cal_est: "Estimate") -> "Estimate":
+    """Combine run + calibrate-model estimates into a single pre-flight
+    block when --calibrate is given. Times sum (calibrate runs first,
+    then pipeline); peak is the max (they don't overlap on disk)."""
+    return Estimate(
+        label="run --calibrate",
+        model_name=run_est.model_name,
+        n_formats=run_est.n_formats,
+        source_size=run_est.source_size,
+        bf16_size=run_est.bf16_size,
+        final_size=run_est.final_size,
+        peak=max(run_est.peak or 0, cal_est.peak or 0) or None,
+        free_disk=run_est.free_disk,
+        time_low_min=run_est.time_low_min + cal_est.time_low_min,
+        time_high_min=run_est.time_high_min + cal_est.time_high_min,
+        source_cached=run_est.source_cached,
+        bf16_cached=run_est.bf16_cached,
+        budget=run_est.budget,
+        priority=run_est.priority,
+        chunks_imatrix=run_est.chunks_imatrix,
+        chunks_ppl=run_est.chunks_ppl,
+    )
+
+
 def find_perf_file(layout: Layout, model_name: str) -> Optional[Path]:
     """Two-tier lookup: model-specific > system > shipped."""
     model_specific = layout.model_calibration_path(model_name)
@@ -759,18 +806,57 @@ def cleanup(layout: Layout, resolved: ResolvedInput, ctx: PurgeContext,
 
 def run_pipeline(cfg: Config, resolved: ResolvedInput,
                  imatrix_override: Optional[str], purge: str,
-                 assume_yes: bool = False) -> Optional[Path]:
+                 assume_yes: bool = False,
+                 do_calibrate: bool = False,
+                 calibrate_chunks: Optional[int] = None) -> Optional[Path]:
     """Execute the full A→I pipeline. Returns path to the final GGUF, or
-    None if the user aborted at the pre-flight prompt."""
+    None if the user aborted at the pre-flight prompt.
+
+    If `do_calibrate=True`, runs `calibrate model` against this input first
+    (writing calibration/models/<name>.json). Skipped automatically if a
+    complete model calibration already exists for the configured `quants`.
+    """
     layout = Layout.for_run(base=cfg.base, model_name=resolved.model_name)
+
+    # Decide whether the calibration step is actually needed.
+    cal_cfg: Optional[Config] = None
+    needs_calibration = False
+    if do_calibrate:
+        cal_path = layout.model_calibration_path(resolved.model_name)
+        if _is_complete_for_quants(cal_path, cfg.quants):
+            print(f"[run] --calibrate: model.json already complete at "
+                  f"{cal_path}; skipping calibration step")
+        else:
+            needs_calibration = True
+            cal_cfg = _dc_replace(cfg)
+            if calibrate_chunks is not None:
+                cal_cfg.ppl_chunks = calibrate_chunks
 
     # Pre-flight estimate + accept/abort. Layout is constructed but not
     # mkdir'd yet, so an aborted invocation leaves no traces.
     est = estimate_run(cfg, resolved, layout)
+    if needs_calibration and cal_cfg is not None:
+        cal_est = estimate_calibrate(cal_cfg, "model", resolved, layout)
+        est = _compose_run_with_calibrate(est, cal_est)
     if not confirm_or_abort(est, assume_yes=assume_yes):
         return None
 
     layout.make()
+
+    # Run model calibration first if requested + needed. Force purge="no"
+    # because the BF16 GGUF + imatrix that calibrate produces are
+    # immediately consumed by the pipeline that follows; purging would
+    # delete them and force re-generation. The pipeline's own --purge
+    # setting handles end-of-run cleanup correctly.
+    if needs_calibration and cal_cfg is not None:
+        from .calibration import run_calibrate
+        cal_result = run_calibrate(cal_cfg, "model", resolved, purge="no",
+                                    imatrix_override=imatrix_override,
+                                    assume_yes=True)
+        if cal_result is None:
+            print("[run] calibration step failed/aborted; halting pipeline.",
+                  file=sys.stderr)
+            return None
     print("=" * 70)
     print(f"prismaquant-llama run — {layout.run_label}")
     print("=" * 70)
@@ -907,6 +993,17 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--yes", "-y", action="store_true",
                    help="skip the pre-flight disk + time confirmation prompt "
                         "(required for non-interactive / scripted use)")
+    p.add_argument("--calibrate", action="store_true",
+                   help="run `calibrate model` against this input before the "
+                        "pipeline, writing calibration/models/<name>.json. "
+                        "The allocator then prefers it over system.json. "
+                        "Skipped automatically when a complete model.json "
+                        "already exists for the configured quants list.")
+    p.add_argument("--calibrate-chunks", type=int, default=None,
+                   help="ppl_chunks override for the --calibrate step only "
+                        "(does NOT affect Stage I's final eval, which uses "
+                        "--ppl-chunks). Useful for high-fidelity calibration "
+                        "while keeping the run's eval fast.")
 
 
 def cfg_from_args(args) -> Config:
@@ -944,7 +1041,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     resolved = resolve_input(args.input, allow_gguf=False)
     try:
         result = run_pipeline(cfg, resolved, args.imatrix, args.purge,
-                               assume_yes=args.yes)
+                               assume_yes=args.yes,
+                               do_calibrate=args.calibrate,
+                               calibrate_chunks=args.calibrate_chunks)
         return 0 if result is not None else 1
     except (SystemExit, FileNotFoundError, ValueError) as e:
         print(f"\nFAIL: {e}", file=sys.stderr)
