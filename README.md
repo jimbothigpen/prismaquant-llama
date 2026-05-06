@@ -136,9 +136,25 @@ Calibration accepts all four input forms (HF id, on-disk safetensors dir,
 on-disk f16/bf16 GGUF, URL to GGUF — comma-separate split files), since
 calibrate doesn't run the probe stage.
 
-### `--config` and `--libs`
+Internally, calibration generates an imatrix (using the configured
+`imatrix_corpus`) on the reference GGUF once, then passes it to every
+per-format `llama-quantize` invocation in the loop. This matches what
+`run` does at Stage H, so calibration measurements aren't biased
+against the i-quants and IK-family formats that depend on imatrix
+weighting. The generated imatrix lands in `_shared/imatrix-cache/` and
+is reused by subsequent `run` invocations on the same model.
 
-Both flags are universal across commands:
+Per-format perf data is persisted to `system.json` (or
+`models/<name>.json`) after every format. If a calibration run is
+killed mid-sweep, just re-invoke the same command — already-measured
+formats are skipped and the run picks up where it left off. Live
+subprocess output streams to `<base>/work/<run>/logs/calibrate-<fmt>.log`
+(per format) plus a meta `calibrate.log` showing the high-level
+progress. Useful for `tail -f` while a multi-hour calibration runs.
+
+### Universal flags
+
+These work on both `run` and `calibrate`:
 
 - `--config /some/other.toml` uses an alternative config file. Useful for
   maintaining separate configs per fork (one mainline, one ik_llama, etc.) —
@@ -146,6 +162,10 @@ Both flags are universal across commands:
 - `--libs /opt/llama/lib` prepends a directory to `LD_LIBRARY_PATH` for
   every subprocess call. Use when your llama.cpp libs aren't on the
   system loader path.
+- `--convert-script /path/to/convert_hf_to_gguf.py` overrides the
+  convert-script location. Auto-discovery looks two levels up from
+  `path` and next to the binary; set this if your install puts the
+  script elsewhere.
 
 ## Configuration
 
@@ -166,6 +186,7 @@ imatrix_corpus = ""                                # empty = bundled bartowski-v
 ppl_chunks     = 50
 imatrix_chunks = 50
 convert_script = ""                                # empty = auto-discover; set if cmake-installed
+libs           = ""                                # empty = no LD_LIBRARY_PATH override
 ```
 
 **`convert_script`**: `convert_hf_to_gguf.py` is NOT installed by

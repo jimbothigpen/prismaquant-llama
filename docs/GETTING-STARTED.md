@@ -120,12 +120,13 @@ That's the whole minimal command. Defaults applied:
 | Default | Value |
 |---|---|
 | `path` | `$PATH` lookup |
-| `quants` | mainline llama.cpp set (Q3_K through Q8_0 + IQ3_XXS, IQ3_S, IQ4_XS, IQ4_NL) |
+| `quants` | 12 mainline formats: `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ3_XXS`, `IQ3_XS`, `IQ3_S`, `IQ3_M`, `IQ4_XS`, `IQ4_NL`, `BF16` |
 | `budget` | 25% of BF16 |
 | `priority` | 111 (equal PPL/TG/PP) |
 | `ppl_corpus` | bundled wikitext-2-raw |
 | `imatrix_corpus` | bundled bartowski-v5-semantic |
 | `ppl_chunks` / `imatrix_chunks` | 50 each |
+| `convert_script` / `libs` | auto-discover / no override |
 
 This runs all 9 stages:
 
@@ -171,6 +172,7 @@ imatrix_corpus = ""
 ppl_chunks     = 50
 imatrix_chunks = 50
 convert_script = ""
+libs           = ""
 ```
 
 **Common tweaks:**
@@ -236,13 +238,36 @@ prismaquant-llama calibrate system Qwen/Qwen3-8B \
     --ppl-chunks 100
 ```
 
-This quantizes the reference model to each format in your config's
-`quants` list, runs `llama-perplexity` and `llama-bench` against each,
-and writes the results to `~/.prismaquant-llama/calibration/system.json`.
-That file is then auto-discovered by every subsequent `run`.
+This:
 
-Wall time: ~5–15 min per format × N formats. For 9 formats that's
-roughly an hour.
+1. Generates an imatrix on the reference GGUF (using the configured
+   `imatrix_corpus`) once, and caches it in `_shared/imatrix-cache/`
+   for re-use by future `run` invocations.
+2. For each format in your `quants` list: quantizes the reference GGUF
+   to that format **using the imatrix**, runs `llama-perplexity`,
+   runs `llama-bench`.
+3. Persists results to `~/.prismaquant-llama/calibration/system.json`
+   *after every format*. The runner picks this up automatically on
+   subsequent `run` invocations.
+
+Wall time: ~5–15 min per format × N formats. For the default 12-quant
+list that's roughly an hour and a half; for a fork-extended list of
+~22 quants, ~3–4 hours.
+
+**Resume-safe**: if a calibration run is killed or crashes mid-sweep,
+just re-invoke the same command. Already-completed formats are skipped
+and the run picks up where it left off.
+
+**Live logs**: subprocess output streams to per-format log files
+under `<base>/work/<run>/logs/`. To watch:
+
+```bash
+# Meta progress (which format / which step)
+tail -f ~/.prismaquant-llama/work/Qwen3-8B-*/logs/calibrate.log
+
+# Live subprocess output for a specific format
+tail -f ~/.prismaquant-llama/work/Qwen3-8B-*/logs/calibrate-Q4_K.log
+```
 
 **Tip**: a quick calibration with `--ppl-chunks 50` is faster and adequate
 for ranking adjacent K-quants. Bump to 200 if you care about precise
@@ -352,14 +377,18 @@ prismaquant-llama run INPUT \
 
 ```bash
 prismaquant-llama calibrate {system|model} INPUT \
-    [--config PATH]
-    [--libs DIR]
-    [--base DIR]
-    [--path DIR]
-    [--quants Q1,Q2,...]
-    [--ppl-corpus PATH|URL]
-    [--ppl-chunks N]
-    [--purge {yes,no}]
+    [--config PATH]              # alternative config.toml
+    [--libs DIR]                 # extra LD_LIBRARY_PATH dir
+    [--base DIR]                 # working directory (default: from config)
+    [--path DIR]                 # llama.cpp binary directory (default: $PATH)
+    [--quants Q1,Q2,...]         # whitelist (default: from config)
+    [--ppl-corpus PATH|URL]      # default: bundled wikitext
+    [--imatrix-corpus PATH|URL]  # default: bundled bartowski-v5
+    [--imatrix PATH|URL]         # use existing imatrix file (skip generation)
+    [--ppl-chunks N]             # default: from config
+    [--imatrix-chunks N]         # default: from config
+    [--convert-script PATH]      # convert_hf_to_gguf.py location (default: auto-discover)
+    [--purge {yes,no}]           # default: yes
 ```
 
 ### Troubleshooting
