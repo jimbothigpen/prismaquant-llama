@@ -49,8 +49,8 @@ class Config:
     ppl_chunks: int
     imatrix_chunks: int
     convert_script: Optional[Path]  # path to convert_hf_to_gguf.py; None ⇒ search
+    libs: Optional[Path]            # extra dir prepended to LD_LIBRARY_PATH; None ⇒ no override
 
-    libs: Optional[Path] = None     # comes from --libs flag, not TOML
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -132,11 +132,20 @@ def load_config(config_path: Optional[Path] = None,
     raw_convert = section.get("convert_script") or ""
     convert_script = _expand_path(raw_convert) if raw_convert else None
 
-    libs_resolved: Optional[Path] = None
+    # libs: CLI --libs > [prismaquant-llama] libs > None.
     if libs is not None:
         libs_resolved = Path(libs).expanduser().resolve()
         if not libs_resolved.is_dir():
             raise FileNotFoundError(f"--libs: directory not found: {libs_resolved}")
+    else:
+        raw_libs = section.get("libs") or ""
+        if raw_libs:
+            libs_resolved = Path(str(raw_libs)).expanduser().resolve()
+            if not libs_resolved.is_dir():
+                raise FileNotFoundError(
+                    f"config 'libs' directory not found: {libs_resolved}")
+        else:
+            libs_resolved = None
 
     return Config(
         base=base, path=path, quants=quants, budget=budget,

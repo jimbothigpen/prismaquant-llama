@@ -213,3 +213,20 @@ imatrix_chunks = 50
 # Override per-run with `--convert-script /path/to/convert_hf_to_gguf.py`.
 # ──────────────────────────────────────────────────────────────────────────────
 convert_script = ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# libs — extra directory prepended to LD_LIBRARY_PATH for every subprocess
+# call we make (llama-quantize, llama-imatrix, llama-perplexity, llama-bench,
+# llama-quantize-cost, convert_hf_to_gguf.py, the bundled allocator scripts).
+#
+# Set this if your llama.cpp binaries depend on a libllama.so / libggml.so
+# that isn't on your system loader path — for example, if you built
+# llama.cpp with shared libs at `<fork>/build/src/` and your binaries at
+# `<fork>/build/bin/` need to find them at runtime.
+#
+# Empty string ("") means no override (system LD_LIBRARY_PATH is used as-is).
+#
+# Override per-run with `--libs /path/to/llama-libs`.
+# ──────────────────────────────────────────────────────────────────────────────
+libs = ""
