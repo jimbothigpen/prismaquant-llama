@@ -152,20 +152,24 @@ def download_hf(cfg: Config, layout: Layout, hf_id: str,
 
 def convert_to_bf16(cfg: Config, layout: Layout,
                     safetensors_dir: Path, model_name: str) -> Path:
-    """Stage B. Convert safetensors → BF16 GGUF. Idempotent."""
-    out = layout.bf16_dir / f"{model_name}-BF16.gguf"
+    """Stage B. Convert safetensors → reference GGUF (BF16 or F16, per
+    cfg.reference_format). Idempotent. Function name retained for backward
+    API compatibility; the on-disk filename and --outtype reflect the
+    configured reference format."""
+    ref_upper = cfg.reference_format.upper()  # "BF16" or "F16"
+    out = layout.bf16_dir / f"{model_name}-{ref_upper}.gguf"
     if out.exists():
-        _log(layout, "B", f"B. BF16 GGUF cached at {out} (skip)")
+        _log(layout, "B", f"B. {ref_upper} GGUF cached at {out} (skip)")
         return out
     convert_script = _find_convert_script(cfg)
     _log(layout, "B", f"B. converting {safetensors_dir} → {out}")
     rc = _run(["python3", str(convert_script), str(safetensors_dir),
-               "--outtype", "bf16", "--outfile", str(out)],
+               "--outtype", cfg.reference_format, "--outfile", str(out)],
               layout.logs_dir / "stage-B.log",
               env=subprocess_env(cfg))
     if rc != 0 or not out.exists():
         raise SystemExit(f"FAIL: B convert_hf_to_gguf.py exit={rc}")
-    _log(layout, "B", f"B. BF16 GGUF: {out.stat().st_size/1024**3:.2f} GB")
+    _log(layout, "B", f"B. {ref_upper} GGUF: {out.stat().st_size/1024**3:.2f} GB")
     return out
 
 

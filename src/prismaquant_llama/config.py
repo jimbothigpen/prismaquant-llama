@@ -50,6 +50,14 @@ class Config:
     imatrix_chunks: int
     convert_script: Optional[Path]  # path to convert_hf_to_gguf.py; None ⇒ search
     libs: Optional[Path]            # extra dir prepended to LD_LIBRARY_PATH; None ⇒ no override
+    reference_format: str = "bf16"  # "bf16" (default) or "f16"; controls Stage B
+                                    # outtype + the calibration's reference for
+                                    # Δppl / pp/tg ratios. Use "f16" on backends
+                                    # whose hipblas lacks BF16 GEMM kernels (e.g.
+                                    # gfx1102/1103 ROCm). Output JSON field names
+                                    # (ppl_delta_vs_f16, pp_ratio_vs_bf16, etc.)
+                                    # retain their legacy names for backward
+                                    # compatibility regardless of this setting.
 
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
@@ -132,6 +140,12 @@ def load_config(config_path: Optional[Path] = None,
     raw_convert = section.get("convert_script") or ""
     convert_script = _expand_path(raw_convert) if raw_convert else None
 
+    reference_format = str(section.get("reference_format") or "bf16").strip().lower()
+    if reference_format not in ("bf16", "f16"):
+        raise ValueError(
+            f"config 'reference_format' must be 'bf16' or 'f16'; got "
+            f"{reference_format!r}")
+
     # libs: CLI --libs > [prismaquant-llama] libs > None.
     if libs is not None:
         libs_resolved = Path(libs).expanduser().resolve()
@@ -153,7 +167,9 @@ def load_config(config_path: Optional[Path] = None,
         imatrix_corpus=imatrix_corpus,
         ppl_chunks=ppl_chunks, imatrix_chunks=imatrix_chunks,
         convert_script=convert_script,
-        libs=libs_resolved, config_path=config_path,
+        libs=libs_resolved,
+        reference_format=reference_format,
+        config_path=config_path,
     )
 
 

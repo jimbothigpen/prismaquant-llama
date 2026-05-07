@@ -104,6 +104,29 @@ quants = [
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# reference_format — "bf16" (default) or "f16". Controls Stage B's GGUF
+# conversion outtype AND the calibration's reference for Δppl / pp/tg ratio
+# computation. The corresponding entry must appear in the `quants` list above
+# (use "BF16" with reference_format="bf16", "F16" with reference_format="f16");
+# the calibrator auto-adds the reference if absent.
+#
+# When to set "f16": on backends whose hipblas / GEMM library lacks BF16
+# kernels for some shapes — notably gfx1102 / gfx1103 ROCm (RDNA3 navi33/32)
+# under stock ROCm + Tensile. Symptom: Stage D imatrix or the BF16 ppl run
+# crashes with `CUBLAS_STATUS_INTERNAL_ERROR` on a hipblasGemmEx call with
+# `HIP_R_16BF` arguments. F16 GEMM kernels (`HIP_R_16F`) are well-supported
+# on the same hardware. Output JSON field names (ppl_delta_vs_f16,
+# pp_ratio_vs_bf16, tg_ratio_vs_bf16) keep their legacy names regardless;
+# semantically they're "delta vs the configured reference."
+#
+# Caveat: F16 has narrower dynamic range than BF16 (5-bit vs 8-bit exponent).
+# For most modern LLM weights this is a non-issue (Qwen, Llama, Phi, etc.);
+# models with extreme RMS norms (some Mistral checkpoints) can saturate F16.
+# ──────────────────────────────────────────────────────────────────────────────
+reference_format = "bf16"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # budget — target final GGUF size as a percentage of the BF16 GGUF size.
 # Reference points (approximate, model-dependent):
 #   - Q8_0    → ~50%

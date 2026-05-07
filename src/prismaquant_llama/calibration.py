@@ -279,10 +279,12 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
     n_params = _count_params(ref_gguf)
     meta_log = layout.logs_dir / "calibrate.log"
 
-    # Always measure BF16 reference for ratio computation.
+    # Always measure the reference format for Δppl / pp/tg ratio computation.
+    # Reference key is "BF16" or "F16" depending on cfg.reference_format.
+    ref_key = cfg.reference_format.upper()  # "BF16" or "F16"
     formats = list(cfg.quants)
-    if "BF16" not in formats:
-        formats = ["BF16"] + formats
+    if ref_key not in formats:
+        formats = [ref_key] + formats
 
     # Resume from any prior partial perf JSON.
     results: dict[str, FormatMeasurement] = _load_existing(output_path)
@@ -292,7 +294,7 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
                        f"formats already complete in {output_path}")
 
     bf16_ppl: Optional[float] = None
-    bf16_existing = results.get("BF16")
+    bf16_existing = results.get(ref_key)
     if bf16_existing and bf16_existing.ppl is not None:
         bf16_ppl = bf16_existing.ppl
 
@@ -322,7 +324,8 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
                                   imatrix=imatrix):
                 m.error = "quantize failed"
                 results[fmt] = m
-                _write_perf_json(output_path, results, model_name, cfg.ppl_chunks)
+                _write_perf_json(output_path, results, model_name, cfg.ppl_chunks,
+                                 reference_format=ref_key)
                 _log(meta_log, f"   FAIL ({time.time()-t0:.1f}s)")
                 continue
             _log(meta_log, f"   quantize done ({time.time()-t0:.1f}s)")
@@ -334,7 +337,7 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
         _log(meta_log, f"   ppl (chunks={cfg.ppl_chunks})  (live: {fmt_log.name})")
         ppl, ppl_err = _measure_perplexity(cfg, target, ppl_corpus, fmt_log)
         m.ppl, m.ppl_stderr = ppl, ppl_err
-        if fmt == "BF16" and bf16_ppl is None:
+        if fmt == ref_key and bf16_ppl is None:
             bf16_ppl = ppl
         elif bf16_ppl is not None and ppl is not None:
             m.ppl_delta_vs_f16 = round(ppl - bf16_ppl, 4)
@@ -344,7 +347,8 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
 
         results[fmt] = m
         # Persist after every format so a crash preserves progress.
-        _write_perf_json(output_path, results, model_name, cfg.ppl_chunks)
+        _write_perf_json(output_path, results, model_name, cfg.ppl_chunks,
+                         reference_format=ref_key)
 
         # Delete scratch (not the original ref_gguf)
         if target is scratch:
@@ -354,32 +358,35 @@ def _calibrate_formats(cfg: Config, ref_gguf: Path, scratch_dir: Path,
         _log(meta_log, f"   → bpw={m.bpw} ppl={m.ppl} "
                        f"Δ={m.ppl_delta_vs_f16} pp={m.pp} tg={m.tg}")
 
-    # Backfill ratios after we have BF16 numbers (idempotent — re-runnable on resume).
-    bf16 = results.get("BF16")
+    # Backfill ratios after we have reference numbers (idempotent — re-runnable on resume).
+    bf16 = results.get(ref_key)
     if bf16 and bf16.pp and bf16.tg:
         for m in results.values():
             if m.pp is not None:
                 m.pp_ratio_vs_bf16 = round(m.pp / bf16.pp, 4)
             if m.tg is not None:
                 m.tg_ratio_vs_bf16 = round(m.tg / bf16.tg, 4)
-    # Backfill ppl_delta_vs_f16 too, in case BF16 was measured later than other formats.
+    # Backfill ppl_delta_vs_f16 too, in case the reference was measured later
+    # than other formats.
     if bf16 and bf16.ppl is not None:
         for fmt_name, m in results.items():
             if (m.ppl is not None and m.ppl_delta_vs_f16 is None
-                    and fmt_name != "BF16"):
+                    and fmt_name != ref_key):
                 m.ppl_delta_vs_f16 = round(m.ppl - bf16.ppl, 4)
     # Final write with all backfilled ratios in place.
-    _write_perf_json(output_path, results, model_name, cfg.ppl_chunks)
+    _write_perf_json(output_path, results, model_name, cfg.ppl_chunks,
+                     reference_format=ref_key)
 
     return results
 
 
 def _write_perf_json(output: Path, results: dict[str, FormatMeasurement],
-                     model_name: str, chunks: int) -> None:
+                     model_name: str, chunks: int,
+                     reference_format: str = "BF16") -> None:
     out = {
         "_schema_version": 4,
         "_reference_model": model_name,
-        "_reference_format": "BF16",
+        "_reference_format": reference_format,
         "_calibrated_at": datetime.now(timezone.utc).isoformat(),
         "_calibration_chunks": chunks,
     }
@@ -478,13 +485,14 @@ def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
                 if target.exists():
                     shutil.rmtree(target, ignore_errors=True)
                     print(f"  [purge] removed: gguf-cache/{resolved.model_name}")
-            bf16 = layout.bf16_dir / f"{resolved.model_name}-BF16.gguf"
+            ref_upper = cfg.reference_format.upper()
+            bf16 = layout.bf16_dir / f"{resolved.model_name}-{ref_upper}.gguf"
             if bf16.exists() and resolved.kind in ("hf", "safetensors_dir"):
                 # Only delete if WE generated it (not for gguf_local/url where
                 # the input GGUF is the file itself)
                 if resolved.kind == "hf":
                     bf16.unlink()
-                    print("  [purge] removed: bf16")
+                    print(f"  [purge] removed: bf16/{resolved.model_name}-{ref_upper}")
         if ppl_was_downloaded:
             ppl_corpus.unlink(missing_ok=True)
             print("  [purge] removed: ppl-corpus")
