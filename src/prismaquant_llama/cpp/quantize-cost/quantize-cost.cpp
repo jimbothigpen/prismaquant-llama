@@ -68,6 +68,36 @@ static const type_entry KNOWN_TYPES[] = {
     {GGML_TYPE_IQ2_XXS, "IQ2_XXS"},
     {GGML_TYPE_IQ3_S,   "IQ3_S"},
     {GGML_TYPE_IQ3_XXS, "IQ3_XXS"},
+    // Float and half types
+    {GGML_TYPE_F32,     "F32"},
+    {GGML_TYPE_F16,     "F16"},
+    {GGML_TYPE_BF16,    "BF16"},
+    // 1-bit / 2-bit completers exposed by llama-quantize but missing here
+    {GGML_TYPE_IQ1_S,   "IQ1_S"},
+    {GGML_TYPE_IQ1_M,   "IQ1_M"},
+    // Note: IQ2_M is a recipe (LLAMA_FTYPE_MOSTLY_IQ2_M, mix of types) — no GGML_TYPE_IQ2_M;
+    // approximated by measuring IQ2_S cost.
+    {GGML_TYPE_IQ2_S,   "IQ2_M"},
+    // Ternary/turbo-quant family from frankenturbo2 ggml.h (some not in --help output)
+    {GGML_TYPE_TQ1_0,   "TQ1_0"},
+    {GGML_TYPE_TQ2_0,   "TQ2_0"},
+    {GGML_TYPE_TQ3_0,   "TQ3_0"},
+    {GGML_TYPE_TQ3_4S,  "TQ3_4S"},
+    {GGML_TYPE_TQ3_4SE, "TQ3_4SE"},
+    {GGML_TYPE_TQ3_1S_AP1, "TQ3_1S_AP1"},
+    {GGML_TYPE_TQ4_1S,  "TQ4_1S"},
+    {GGML_TYPE_Q4_1_TQ, "Q4_1_TQ"},
+    // MXFP4 + MoE recipe (recipe is per-tensor mostly-MXFP4; approximate as MXFP4 cost)
+    {GGML_TYPE_MXFP4,   "MXFP4"},
+    {GGML_TYPE_MXFP4,   "MXFP4_MOE"},
+    // 1-bit ternary group types
+    {GGML_TYPE_Q1_0,    "Q1_0"},
+    {GGML_TYPE_Q1_0_G128, "Q1_0_G128"},
+    // Multi-tensor recipes (no direct GGML_TYPE) — approximate by dominant ggml_type:
+    //   IQ3_XS recipe is mostly-IQ3 mix at 3.3 bpw → measure as IQ3_S cost
+    //   IQ3_M  recipe is mostly-IQ3 mix at 3.66 bpw → measure as IQ3_S cost
+    {GGML_TYPE_IQ3_S,   "IQ3_XS"},
+    {GGML_TYPE_IQ3_S,   "IQ3_M"},
 };
 
 static bool ieq(const std::string & a, const std::string & b) {
@@ -251,13 +281,20 @@ int main(int argc, char ** argv) {
     for (const auto & nm : split_csv(types_csv)) {
         ggml_type t;
         if (!resolve_type(nm, t)) {
-            fprintf(stderr, "unknown type: %s\n", nm.c_str());
-            return 1;
+            // Skip-with-warning instead of fatal: prismaquant-style callers pass the full
+            // calibration sweep including recipe-only names. Producing partial output is
+            // strictly more useful than failing the whole run.
+            fprintf(stderr, "[quantize-cost] WARN: skipping unknown type: %s\n", nm.c_str());
+            continue;
         }
         // Look up the canonical name we keep
         const char * canon = nm.c_str();
         for (const auto & e : KNOWN_TYPES) if (e.t == t) canon = e.name;
         targets.push_back({t, canon});
+    }
+    if (targets.empty()) {
+        fprintf(stderr, "[quantize-cost] no known types in --types list; nothing to do\n");
+        return 1;
     }
 
     std::regex include_rx, exclude_rx;
