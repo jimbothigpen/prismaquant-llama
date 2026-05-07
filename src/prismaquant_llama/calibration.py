@@ -47,7 +47,7 @@ from typing import Optional
 from .config import (Config, load_config, find_tool, subprocess_env,
                      resolve_corpus)
 from .input_resolver import ResolvedInput, resolve as resolve_input
-from .paths import Layout
+from .paths import Layout, wipe_model_artifacts
 from .pipeline_runner import (download_hf, convert_to_bf16, download_gguf_url,
                               stage_d_imatrix, _resolve_imatrix_override,
                               cfg_from_args,
@@ -417,12 +417,27 @@ def _write_perf_json(output: Path, results: dict[str, FormatMeasurement],
 def run_calibrate(cfg: Config, mode: str, resolved: ResolvedInput,
                   purge: str,
                   imatrix_override: Optional[str] = None,
-                  assume_yes: bool = False) -> Optional[Path]:
+                  assume_yes: bool = False,
+                  force: bool = False) -> Optional[Path]:
     """Run calibration. mode ∈ {'system', 'model'}.
 
     Returns path to the written perf JSON, or None if the user aborted
     at the pre-flight prompt."""
     layout = Layout.for_run(base=cfg.base, model_name=resolved.model_name)
+
+    # --force: nuke prior artifacts for this model + mode BEFORE the
+    # pre-flight estimate, so the estimate reflects the real work needed.
+    if force:
+        deleted = wipe_model_artifacts(layout, resolved.model_name,
+                                        cfg.reference_format,
+                                        calibration_mode=mode)
+        if deleted:
+            print(f"[force] removed {len(deleted)} prior artifact"
+                  f"{'s' if len(deleted) != 1 else ''}:")
+            for d in deleted:
+                print(f"  - {d}")
+        else:
+            print("[force] no prior artifacts to remove")
 
     # Pre-flight estimate + accept/abort.
     est = estimate_calibrate(cfg, mode, resolved, layout)
@@ -543,6 +558,15 @@ def add_calibrate_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--yes", "-y", action="store_true",
                    help="skip the pre-flight disk + time confirmation prompt "
                         "(required for non-interactive / scripted use)")
+    p.add_argument("--force", action="store_true",
+                   help="nuclear: before running, delete every artifact "
+                        "associated with this model under {base} (BF16 GGUF, "
+                        "HF cache, probe, SHA-keyed imatrix-cache and "
+                        "costs-cache entries for this model, final GGUFs, and "
+                        "the calibration JSON for the chosen mode) so the "
+                        "entire calibration is recomputed from scratch. Use "
+                        "after a llama.cpp bugfix that invalidates prior "
+                        "measurements.")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -561,7 +585,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         result = run_calibrate(cfg, args.mode, resolved, args.purge,
                                 imatrix_override=args.imatrix,
-                                assume_yes=args.yes)
+                                assume_yes=args.yes,
+                                force=args.force)
         return 0 if result is not None else 1
     except (SystemExit, FileNotFoundError, ValueError) as e:
         print(f"\nFAIL: {e}", file=sys.stderr)

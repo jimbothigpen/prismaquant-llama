@@ -33,7 +33,7 @@ from typing import Optional
 from .config import (Config, load_config, find_tool, subprocess_env,
                      resolve_corpus, LLAMA_TOOLS)
 from .input_resolver import ResolvedInput, resolve as resolve_input
-from .paths import Layout
+from .paths import Layout, wipe_model_artifacts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -812,7 +812,8 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
                  imatrix_override: Optional[str], purge: str,
                  assume_yes: bool = False,
                  do_calibrate: bool = False,
-                 calibrate_chunks: Optional[int] = None) -> Optional[Path]:
+                 calibrate_chunks: Optional[int] = None,
+                 force: bool = False) -> Optional[Path]:
     """Execute the full A→I pipeline. Returns path to the final GGUF, or
     None if the user aborted at the pre-flight prompt.
 
@@ -821,6 +822,22 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
     complete model calibration already exists for the configured `quants`.
     """
     layout = Layout.for_run(base=cfg.base, model_name=resolved.model_name)
+
+    # --force: nuke prior artifacts for this model BEFORE the pre-flight
+    # estimate + the calibration-needed check, so they reflect a real
+    # from-scratch run. Always wipe the model.json since `run` consults it
+    # via find_perf_file even without --calibrate.
+    if force:
+        deleted = wipe_model_artifacts(layout, resolved.model_name,
+                                        cfg.reference_format,
+                                        calibration_mode="model")
+        if deleted:
+            print(f"[force] removed {len(deleted)} prior artifact"
+                  f"{'s' if len(deleted) != 1 else ''}:")
+            for d in deleted:
+                print(f"  - {d}")
+        else:
+            print("[force] no prior artifacts to remove")
 
     # Decide whether the calibration step is actually needed.
     cal_cfg: Optional[Config] = None
@@ -1008,6 +1025,14 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                         "(does NOT affect Stage I's final eval, which uses "
                         "--ppl-chunks). Useful for high-fidelity calibration "
                         "while keeping the run's eval fast.")
+    p.add_argument("--force", action="store_true",
+                   help="nuclear: before running, delete every artifact "
+                        "associated with this model under {base} (BF16 GGUF, "
+                        "HF cache, probe, SHA-keyed imatrix-cache and "
+                        "costs-cache entries for this model, final GGUFs, and "
+                        "the model calibration JSON) so the entire pipeline "
+                        "is recomputed from scratch. Use after a llama.cpp "
+                        "bugfix that invalidates prior outputs.")
 
 
 def cfg_from_args(args) -> Config:
@@ -1047,7 +1072,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         result = run_pipeline(cfg, resolved, args.imatrix, args.purge,
                                assume_yes=args.yes,
                                do_calibrate=args.calibrate,
-                               calibrate_chunks=args.calibrate_chunks)
+                               calibrate_chunks=args.calibrate_chunks,
+                               force=args.force)
         return 0 if result is not None else 1
     except (SystemExit, FileNotFoundError, ValueError) as e:
         print(f"\nFAIL: {e}", file=sys.stderr)

@@ -25,6 +25,8 @@ Layout under cfg.base:
 """
 
 from __future__ import annotations
+import hashlib
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -119,3 +121,83 @@ class Layout:
             f"  ggufs (output):   {self.ggufs}",
             f"  work scratch:     {self.work}",
         ]
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def wipe_model_artifacts(layout: "Layout", model_name: str, ref_format: str,
+                         calibration_mode: Optional[str] = None) -> list[str]:
+    """Delete every artifact associated with `model_name` under `layout.base`.
+
+    Used by `prismaquant-llama {run,calibrate} --force` to invalidate prior
+    work after a llama.cpp bugfix (or any other reason to recompute from
+    scratch). Returns a list of human-readable descriptions of what was
+    removed, suitable for printing.
+
+    Order matters: the BF16 GGUF's SHA must be computed BEFORE the BF16 is
+    deleted, so we can identify the SHA-keyed entries in imatrix-cache and
+    costs-cache that belong to this model and remove only those — not other
+    models' caches.
+
+    `calibration_mode` selects which calibration JSON to remove (if any):
+    "system" → calibration/system.json; "model" → calibration/models/<name>.json;
+    None → leave both alone.
+    """
+    deleted: list[str] = []
+
+    def _rm_file(p: Path, label: str) -> None:
+        if p.exists() or p.is_symlink():
+            p.unlink()
+            deleted.append(f"{label}/{p.name}")
+
+    def _rm_tree(p: Path, label: str) -> None:
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+            deleted.append(f"{label}/{p.name}")
+
+    # 1. Compute BF16 SHA before wiping it, so SHA-keyed caches can be pruned.
+    ref_upper = ref_format.upper()
+    bf16 = layout.bf16_dir / f"{model_name}-{ref_upper}.gguf"
+    bf16_sha = _sha256_file(bf16) if bf16.exists() else None
+
+    # 2. SHA-keyed compute caches (imatrix, costs).
+    if bf16_sha is not None:
+        prefix = bf16_sha[:12] + "__"
+        if layout.imatrix_cache.exists():
+            for f in layout.imatrix_cache.iterdir():
+                if f.is_file() and f.name.startswith(prefix):
+                    _rm_file(f, "imatrix-cache")
+        if layout.costs_cache.exists():
+            for f in layout.costs_cache.iterdir():
+                if f.is_file() and f.name.startswith(prefix):
+                    _rm_file(f, "costs-cache")
+
+    # 3. Inputs / converted inputs / probe.
+    _rm_tree(layout.hf_cache / model_name, "hf-cache")
+    _rm_tree(layout.gguf_cache / model_name, "gguf-cache")
+    _rm_file(bf16, "bf16")
+    if layout.probe_dir.exists():
+        for p in layout.probe_dir.glob(f"{model_name}-*"):
+            if p.is_dir():
+                _rm_tree(p, "probe")
+            else:
+                _rm_file(p, "probe")
+
+    # 4. Final GGUFs.
+    if layout.ggufs.exists():
+        for g in layout.ggufs.glob(f"{model_name}-PQ*-*.gguf"):
+            _rm_file(g, "ggufs")
+
+    # 5. Calibration JSON for the requested mode (if any).
+    if calibration_mode == "system":
+        _rm_file(layout.system_calibration_path(), "calibration")
+    elif calibration_mode == "model":
+        _rm_file(layout.model_calibration_path(model_name), "calibration/models")
+
+    return deleted
