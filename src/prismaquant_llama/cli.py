@@ -1,7 +1,7 @@
 """
 prismaquant-llama — unified CLI.
 
-Two subcommands:
+Three subcommands:
 
     prismaquant-llama calibrate {system|model} INPUT [flags]
         Measure per-format size/PPL/throughput for either the system default
@@ -11,6 +11,13 @@ Two subcommands:
         Execute the full prismaquant pipeline (probe → imatrix → costs →
         bridge → allocate → quantize → eval). INPUT must be safetensors
         (HF id or on-disk directory).
+
+    prismaquant-llama explore INPUT --budgets ... --priorities ... [flags]
+        Run A–F (cached on subsequent calls), then sweep the cartesian
+        (budgets × priorities) product through the allocator. Outputs a
+        matrix of predicted size/ΔPPL/TG/PP per cell — no GGUF produced.
+        Useful for picking a (budget, priority) before committing to a
+        full `run`.
 
 Defaults come from ~/.prismaquant-llama/config.toml — auto-installed from
 the shipped default on first run. Edit by hand. CLI flags always win.
@@ -29,6 +36,7 @@ def _print_help() -> None:
     print("Subcommands:")
     print("  calibrate   measure per-format perf data (writes calibration/)")
     print("  run         run the full prismaquant pipeline (writes ggufs/)")
+    print("  explore     sweep (budget × priority) without producing a GGUF")
     print()
     print("Run `prismaquant-llama <subcommand> --help` for per-subcommand options.")
 
@@ -61,6 +69,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if cmd == "run":
         from . import pipeline_runner
         return pipeline_runner.main(argv[1:])
+    if cmd == "explore":
+        from . import explore
+        return explore.main(argv[1:])
 
     print(f"prismaquant-llama: unknown subcommand: {cmd}", file=sys.stderr)
     print("Try `prismaquant-llama --help`.", file=sys.stderr)

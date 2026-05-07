@@ -25,7 +25,7 @@ The total is `Σ_t Δloss(t, fmt[t])`. Minimizing this under a size constraint i
 
 ## Pipeline
 
-`src/prismaquant_llama/pipeline_runner.py` orchestrates the full A→I sequence. Helper scripts (allocator, HF→GGUF bridge) live under [`src/pipeline/scripts/`](../src/pipeline/scripts/); the cost-measurement binary source under [`src/pipeline/cpp/quantize-cost/`](../src/pipeline/cpp/quantize-cost/).
+`src/prismaquant_llama/pipeline_runner.py` orchestrates the full A→I sequence. Helper scripts (allocator, HF→GGUF bridge) live under [`src/pipeline/scripts/`](../src/pipeline/scripts/); the cost-measurement binary source lives in a separate repo at [`jimbothigpen/llama-quantize-cost`](https://github.com/jimbothigpen/llama-quantize-cost) — clone into your llama.cpp tree's `tools/` and build the target.
 
 ```
 A. Download HF safetensors
@@ -173,6 +173,6 @@ Where:
 
 - [`docs/GETTING-STARTED.md`](GETTING-STARTED.md) — hands-on tutorial for the full pipeline
 - [`src/pipeline/scripts/`](../src/pipeline/scripts/) — allocator + HF→GGUF bridge (Python)
-- [`src/pipeline/cpp/quantize-cost/`](../src/pipeline/cpp/quantize-cost/) — cost-measurement binary source
+- [`jimbothigpen/llama-quantize-cost`](https://github.com/jimbothigpen/llama-quantize-cost) — cost-measurement binary source (separate repo; clone into your llama.cpp `tools/` and build)
 - [`examples/recipes/`](../examples/recipes/) — sample allocator outputs to inspect the per-tensor format mapping
 - [Upstream prismaquant](https://github.com/RobTand/prismaquant) — the original tool (vLLM/compressed-tensors target)

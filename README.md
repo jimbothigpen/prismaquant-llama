@@ -6,9 +6,10 @@
 A CLI that adapts the prismaquant allocator (originally built for vLLM /
 compressed-tensors) to **any build of llama.cpp** — mainline
 [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp) or any fork.
-The only build-side requirement is the `llama-quantize-cost` tool, whose
-source ships inside the package; drop it into your llama.cpp tree, rebuild,
-and you're done.
+The only extra build-side requirement is the
+[`llama-quantize-cost`](https://github.com/jimbothigpen/llama-quantize-cost)
+tool — clone it into your llama.cpp tree's `tools/`, register the
+subdirectory, and rebuild.
 
 > **Disclosure — vibe-coded.** I'm an enthusiast, not a programmer. Every
 > line of code, doc, and commit message in this repo was written with
@@ -18,8 +19,8 @@ and you're done.
 > is [RobTand](https://github.com/RobTand/prismaquant)'s work.
 
 > **Status: alpha.** End-to-end pipeline executes through all nine stages
-> (A→I) without manual intervention. Two CLI subcommands (`run` +
-> `calibrate`); persistent defaults via a hand-edited TOML config.
+> (A→I) without manual intervention. Three CLI subcommands (`run`,
+> `calibrate`, `explore`); persistent defaults via a hand-edited TOML config.
 
 ## What this does
 
@@ -38,14 +39,15 @@ pip install --user prismaquant-llama          # once published to PyPI
 pip install -e .
 ```
 
-The package is fully self-contained after install — bundled corpora,
-pipeline scripts, the C++ source for `llama-quantize-cost`, and the
-shipped default config.toml all live inside the installed package and
-require no source-tree access at runtime.
+The package is a pure-Python orchestrator — bundled corpora, pipeline
+scripts, and the shipped default config.toml all live inside the
+installed package and require no source-tree access at runtime. The C++
+build-time dependency (`llama-quantize-cost`) is a separate small repo;
+see below.
 
 ### Required external tools
 
-prismaquant-llama is a pure-Python orchestrator; it shells out to:
+prismaquant-llama shells out to:
 
 | Tool | Source | Notes |
 |---|---|---|
@@ -53,38 +55,34 @@ prismaquant-llama is a pure-Python orchestrator; it shells out to:
 | `llama-imatrix` | your llama.cpp build | standard mainline |
 | `llama-perplexity` | your llama.cpp build | standard mainline |
 | `llama-bench` | your llama.cpp build | standard mainline |
-| `llama-quantize-cost` | **bundled — see below** | not yet upstream |
+| `llama-quantize-cost` | **[`jimbothigpen/llama-quantize-cost`](https://github.com/jimbothigpen/llama-quantize-cost)** | drop-in tool for any llama.cpp fork; not yet in mainline |
 | `prismaquant` Python package | **[`jimbothigpen/prismaquant`](https://github.com/jimbothigpen/prismaquant)** | provides `prismaquant.incremental_probe` for Stage C. Install: `pip install git+https://github.com/jimbothigpen/prismaquant.git` |
 
 ### Building `llama-quantize-cost`
 
-The C++ source ships inside the installed package. To find it:
+Clone the repo into your llama.cpp tree's `tools/` directory, wire it
+into the build, and compile:
 
 ```bash
-python -c "import prismaquant_llama; print(prismaquant_llama.quantize_cost_source_path())"
-```
-
-Copy that directory into your llama.cpp tree's `tools/`, register it, and
-rebuild:
-
-```bash
-SRC=$(python -c "import prismaquant_llama; print(prismaquant_llama.quantize_cost_source_path())")
-cp -r "$SRC" /path/to/your/llama.cpp/tools/
+git clone https://github.com/jimbothigpen/llama-quantize-cost \
+    /path/to/your/llama.cpp/tools/quantize-cost
 echo 'add_subdirectory(quantize-cost)' >> /path/to/your/llama.cpp/tools/CMakeLists.txt
 cmake --build /path/to/your/llama.cpp/build --target llama-quantize-cost
 ```
 
 The resulting binary lands at `build/bin/llama-quantize-cost` — same
 directory as `llama-quantize`. Works against mainline, ik_llama,
-frankenturbo2, etc.
+frankenturbo2, etc. The tool's full README documents the build / verify
+workflow.
 
 ## Usage
 
-Two subcommands. That's the whole CLI.
+Three subcommands.
 
 ```bash
 prismaquant-llama run INPUT [flags]
 prismaquant-llama calibrate {system|model} INPUT [flags]
+prismaquant-llama explore INPUT --budgets ... --priorities ... [flags]
 ```
 
 ### `run` — full pipeline
@@ -175,6 +173,31 @@ formats are skipped and the run picks up where it left off. Live
 subprocess output streams to `<base>/work/<run>/logs/calibrate-<fmt>.log`
 (per format) plus a meta `calibrate.log` showing the high-level
 progress. Useful for `tail -f` while a multi-hour calibration runs.
+
+### `explore` — sweep (budget × priority) without producing a GGUF
+
+`explore` runs Stages A–F as usual (cached on subsequent calls), then
+sweeps the cartesian product of one or more budgets and priorities
+through the allocator. For each cell it reports predicted size,
+ΔPPL, TG, and PP using calibration data — no GGUF is produced and
+no PPL eval runs. Useful for deciding which (budget, priority) to
+commit to a full `run`.
+
+```bash
+prismaquant-llama explore unsloth/gemma-3-4b-it \
+    --budgets 22,25,28,32 \
+    --priorities 111,522,252,225,323
+```
+
+Output is a Markdown table (printed to stdout) plus optional CSV /
+Markdown files via `--output-csv` / `--output-md`. Predicted ΔPPL is a
+size-weighted aggregate of per-format `ppl_delta_vs_f16` from the
+calibration JSON (model-specific if it exists, else system-default).
+This is an approximation — it doesn't account for sensitivity-weighted
+mixing — but it surfaces backend-specific quality issues directly:
+e.g. on Vulkan the IQ4_KSS quality regression shows up as a large
+predicted ΔPPL on rows where the allocator picks IQ4_KSS-heavy
+recipes, which would be invisible from the cost CSV alone.
 
 ### Universal flags
 
@@ -321,12 +344,12 @@ prismaquant-llama/
 │   ├── cli.py                  unified dispatcher
 │   ├── pipeline_runner.py      run subcommand + Stages A–I
 │   ├── calibration.py          calibrate subcommand
+│   ├── explore.py              explore subcommand (budget × priority sweep)
 │   ├── config.py               config.toml loader + first-run installer
 │   ├── input_resolver.py       4-way input classification
 │   ├── paths.py                directory layout
 │   ├── data/                   bundled corpora + system.json.default + config.toml.default
-│   ├── scripts/                bundled allocator + bridge
-│   └── cpp/quantize-cost/      C++ source for llama-quantize-cost
+│   └── scripts/                bundled allocator + bridge
 ├── docs/
 ├── pyproject.toml
 └── README.md

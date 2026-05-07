@@ -45,17 +45,19 @@ K-quant at equal PPL, OR equal size at noticeably better PPL.
    `path = "/your/llama/bin"` in the config (see below).
 
 2. **`llama-quantize-cost`** — Stage E needs a custom binary not in
-   mainline. The C++ source ships inside this package. Find and build:
+   mainline. Source lives in a separate repo,
+   [`jimbothigpen/llama-quantize-cost`](https://github.com/jimbothigpen/llama-quantize-cost).
+   Clone into your llama.cpp tree's `tools/` and build:
 
    ```bash
-   pip install --user prismaquant-llama
-   SRC=$(python -c "import prismaquant_llama; print(prismaquant_llama.quantize_cost_source_path())")
-   cp -r "$SRC" /path/to/your/llama.cpp/tools/
+   git clone https://github.com/jimbothigpen/llama-quantize-cost \
+       /path/to/your/llama.cpp/tools/quantize-cost
    echo 'add_subdirectory(quantize-cost)' >> /path/to/your/llama.cpp/tools/CMakeLists.txt
    cmake --build /path/to/your/llama.cpp/build --target llama-quantize-cost
    ```
 
-   Resulting binary lives next to `llama-quantize`.
+   Resulting binary lives next to `llama-quantize`. The repo's README
+   covers the build + verify workflow.
 
 3. **The `prismaquant` Python package** — Stage C (Hessian probe) shells
    out to `python3 -m prismaquant.incremental_probe`. Install our fork
@@ -455,8 +457,10 @@ continues with what's known.
 **"llama-quantize not found"** — set `path` in config.toml to your
 llama.cpp binary directory, or pass `--path /your/bin`.
 
-**"llama-quantize-cost not found"** — build from the bundled C++ source
-(see Prerequisites section).
+**"llama-quantize-cost not found"** — clone
+[`jimbothigpen/llama-quantize-cost`](https://github.com/jimbothigpen/llama-quantize-cost)
+into your llama.cpp tree's `tools/` and build the target (see
+Prerequisites section).
 
 **"prismaquant package not installed"** (Stage C) — `pip install
 git+https://github.com/jimbothigpen/prismaquant.git`.

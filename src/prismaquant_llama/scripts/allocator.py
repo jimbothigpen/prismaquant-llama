@@ -368,12 +368,79 @@ def solve_for_lambda(fisher: dict[str, float],
     return recipe, total_size, total_loss
 
 
+def _quality_tiebreak(recipe: dict[str, str],
+                      costs: dict,
+                      fisher: dict[str, float],
+                      pinned: dict[str, str],
+                      weights: tuple[float, float, float],
+                      tps: dict,
+                      norms: tuple[float, float, float],
+                      size_tol: float = 0.01,
+                      ) -> dict[str, str]:
+    """Among formats with size within `size_tol` (fractional) of the per-tensor
+    minimum-size format, re-pick by lowest weighted (PPL+TG+PP) cost.
+
+    Used when `bisect_lambda` saturates positive-λ search: the recipe is
+    pinned to the per-tensor minimum-size format, but ties are broken by
+    size alone. At λ→∞, a 0.008 bpw size advantage overwhelms ~30 orders of
+    magnitude of quality+speed signal — e.g. TQ3_4S (4.000 bpw) beats
+    IQ4_KSS (4.008 bpw) on attention even when IQ4_KSS strictly dominates
+    in MSE/PPL/TG/PP. This pass reverses that for tied-size formats.
+
+    The selection uses the same multi-objective cost as `solve_for_lambda`
+    but drops the λ·size term (since candidates here are size-tied)."""
+    w_ppl, w_tg, w_pp = weights
+    n_ppl, n_tg, n_pp = norms
+    out = dict(recipe)
+    for t, fmts in costs.items():
+        if t in pinned or t not in recipe:
+            continue
+        if not fmts:
+            continue
+        # Per-tensor minimum size across post-floor candidates
+        min_sz = min(sz for (_, sz, _, _) in fmts.values())
+        threshold = min_sz * (1.0 + size_tol)
+        candidates = [(f, fmts[f]) for f in fmts if fmts[f][1] <= threshold]
+        if len(candidates) <= 1:
+            continue
+        h = fisher.get(t, 0.0)
+        best_f = recipe[t]
+        best_cost = math.inf
+        for f, (mse, sz, _, _) in candidates:
+            ppl_term = 0.5 * h * mse / n_ppl
+            tg_tps = _tps_lookup(tps, f, "tg")
+            pp_tps = _tps_lookup(tps, f, "pp")
+            tg_term = (sz / tg_tps) / n_tg
+            pp_term = (sz / pp_tps) / n_pp
+            cost = w_ppl * ppl_term + w_tg * tg_term + w_pp * pp_term
+            if cost < best_cost:
+                best_cost = cost
+                best_f = f
+        out[t] = best_f
+    return out
+
+
+def _recompute_size_loss(recipe: dict[str, str], costs: dict,
+                         fisher: dict[str, float]) -> tuple[int, float]:
+    """Sum size + 0.5·h_trace·mse over a recipe (skipping tensors not in costs)."""
+    total_size = 0
+    total_loss = 0.0
+    for t, f in recipe.items():
+        if t not in costs or f not in costs[t]:
+            continue
+        mse, sz, _, _ = costs[t][f]
+        total_size += sz
+        total_loss += 0.5 * fisher.get(t, 0.0) * mse
+    return total_size, total_loss
+
+
 def bisect_lambda(fisher: dict, costs: dict, pinned: dict, budget_bytes: int,
                   weights: tuple[float, float, float] = (1.0, 0.0, 0.0),
                   tps: dict | None = None,
                   norms: tuple[float, float, float] = (1.0, 1.0, 1.0),
                   tol_bytes: int = 10_000_000,
                   band_bytes: int = 0,
+                  saturation_size_tol: float = 0.01,
                   ) -> tuple[float, dict, int, float]:
     """Find λ such that the recipe size is within tol_bytes of the budget.
 
@@ -403,7 +470,19 @@ def bisect_lambda(fisher: dict, costs: dict, pinned: dict, budget_bytes: int,
                 break
             hi *= 2.0
         else:
-            return hi, recipe_hi, size_hi, _
+            # Saturated: budget infeasible under current floors. Recipe is
+            # pinned to the per-tensor minimum-size format with size as the
+            # only tiebreaker. Re-pick by quality among size-tied candidates.
+            print(f"[allocator] WARN: positive-λ search saturated at "
+                  f"λ={hi:.3e}; budget {budget_bytes/(1024**3):.2f} GB infeasible "
+                  f"under current floors. Re-picking by quality among "
+                  f"same-size-class formats (size_tol={saturation_size_tol}).",
+                  flush=True)
+            recipe_hi = _quality_tiebreak(recipe_hi, costs, fisher, pinned,
+                                          weights, tps or {}, norms,
+                                          size_tol=saturation_size_tol)
+            size_hi, loss_hi = _recompute_size_loss(recipe_hi, costs, fisher)
+            return hi, recipe_hi, size_hi, loss_hi
     else:
         # Natural opt under-shoots budget — search negative λ (size reward).
         # This forces the recipe to fill up to the budget, picking larger

@@ -52,5 +52,4 @@ include = ["prismaquant_llama*"]
 prismaquant_llama = [
     "data/*",
     "scripts/*.py",
-    "cpp/quantize-cost/*",
 ]
