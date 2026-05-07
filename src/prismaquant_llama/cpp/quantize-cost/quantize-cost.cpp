@@ -41,65 +41,6 @@ struct type_entry {
     const char * name;
 };
 
-// Subset of the catalog we expect to call.  Matches the names llama-quantize
-// recognizes; resolved via case-insensitive lookup.
-static const type_entry KNOWN_TYPES[] = {
-    {GGML_TYPE_Q4_0,    "Q4_0"},
-    {GGML_TYPE_Q4_1,    "Q4_1"},
-    {GGML_TYPE_Q5_0,    "Q5_0"},
-    {GGML_TYPE_Q5_1,    "Q5_1"},
-    {GGML_TYPE_Q8_0,    "Q8_0"},
-    {GGML_TYPE_Q2_K,    "Q2_K"},
-    {GGML_TYPE_Q3_K,    "Q3_K"},
-    {GGML_TYPE_Q4_K,    "Q4_K"},
-    {GGML_TYPE_Q5_K,    "Q5_K"},
-    {GGML_TYPE_Q6_K,    "Q6_K"},
-    {GGML_TYPE_IQ2_K,   "IQ2_K"},
-    {GGML_TYPE_IQ3_K,   "IQ3_K"},
-    {GGML_TYPE_IQ3_KS,  "IQ3_KS"},
-    {GGML_TYPE_IQ4_K,   "IQ4_K"},
-    {GGML_TYPE_IQ4_KS,  "IQ4_KS"},
-    {GGML_TYPE_IQ4_KSS, "IQ4_KSS"},
-    {GGML_TYPE_IQ4_KT,  "IQ4_KT"},
-    {GGML_TYPE_IQ4_XS,  "IQ4_XS"},
-    {GGML_TYPE_IQ4_NL,  "IQ4_NL"},
-    {GGML_TYPE_IQ2_S,   "IQ2_S"},
-    {GGML_TYPE_IQ2_XS,  "IQ2_XS"},
-    {GGML_TYPE_IQ2_XXS, "IQ2_XXS"},
-    {GGML_TYPE_IQ3_S,   "IQ3_S"},
-    {GGML_TYPE_IQ3_XXS, "IQ3_XXS"},
-    // Float and half types
-    {GGML_TYPE_F32,     "F32"},
-    {GGML_TYPE_F16,     "F16"},
-    {GGML_TYPE_BF16,    "BF16"},
-    // 1-bit / 2-bit completers exposed by llama-quantize but missing here
-    {GGML_TYPE_IQ1_S,   "IQ1_S"},
-    {GGML_TYPE_IQ1_M,   "IQ1_M"},
-    // Note: IQ2_M is a recipe (LLAMA_FTYPE_MOSTLY_IQ2_M, mix of types) — no GGML_TYPE_IQ2_M;
-    // approximated by measuring IQ2_S cost.
-    {GGML_TYPE_IQ2_S,   "IQ2_M"},
-    // Ternary/turbo-quant family from frankenturbo2 ggml.h (some not in --help output)
-    {GGML_TYPE_TQ1_0,   "TQ1_0"},
-    {GGML_TYPE_TQ2_0,   "TQ2_0"},
-    {GGML_TYPE_TQ3_0,   "TQ3_0"},
-    {GGML_TYPE_TQ3_4S,  "TQ3_4S"},
-    {GGML_TYPE_TQ3_4SE, "TQ3_4SE"},
-    {GGML_TYPE_TQ3_1S_AP1, "TQ3_1S_AP1"},
-    {GGML_TYPE_TQ4_1S,  "TQ4_1S"},
-    {GGML_TYPE_Q4_1_TQ, "Q4_1_TQ"},
-    // MXFP4 + MoE recipe (recipe is per-tensor mostly-MXFP4; approximate as MXFP4 cost)
-    {GGML_TYPE_MXFP4,   "MXFP4"},
-    {GGML_TYPE_MXFP4,   "MXFP4_MOE"},
-    // 1-bit ternary group types
-    {GGML_TYPE_Q1_0,    "Q1_0"},
-    {GGML_TYPE_Q1_0_G128, "Q1_0_G128"},
-    // Multi-tensor recipes (no direct GGML_TYPE) — approximate by dominant ggml_type:
-    //   IQ3_XS recipe is mostly-IQ3 mix at 3.3 bpw → measure as IQ3_S cost
-    //   IQ3_M  recipe is mostly-IQ3 mix at 3.66 bpw → measure as IQ3_S cost
-    {GGML_TYPE_IQ3_S,   "IQ3_XS"},
-    {GGML_TYPE_IQ3_S,   "IQ3_M"},
-};
-
 static bool ieq(const std::string & a, const std::string & b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); i++) {
@@ -108,9 +49,22 @@ static bool ieq(const std::string & a, const std::string & b) {
     return true;
 }
 
+// Resolve a type name against the actual ggml type catalog of the build we
+// were compiled into. Iterates 0..GGML_TYPE_COUNT and matches against the
+// canonical name returned by ggml_type_name(). This avoids any hardcoded
+// list that could fall out of sync with whichever fork of ggml the tool
+// was built against (frankenturbo2 has TURBO/TCQ/PLANAR/INNERQ types that
+// don't exist in upstream; ik_llama has IQ?_K etc.).
+//
+// Recipe-only names from llama-quantize (e.g. IQ3_XS, IQ3_M, MXFP4_MOE,
+// Q4_K_M alias, Q*_K_S aliases) are not direct ggml types; they won't
+// resolve here. The caller is expected to either skip them or translate
+// them to a representative ggml_type before invoking this tool.
 static bool resolve_type(const std::string & name, ggml_type & out) {
-    for (const auto & e : KNOWN_TYPES) {
-        if (ieq(name, e.name)) { out = e.t; return true; }
+    for (int i = 0; i < GGML_TYPE_COUNT; i++) {
+        const ggml_type t = (ggml_type) i;
+        const char * nm = ggml_type_name(t);
+        if (nm && ieq(name, nm)) { out = t; return true; }
     }
     return false;
 }
@@ -287,9 +241,10 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[quantize-cost] WARN: skipping unknown type: %s\n", nm.c_str());
             continue;
         }
-        // Look up the canonical name we keep
-        const char * canon = nm.c_str();
-        for (const auto & e : KNOWN_TYPES) if (e.t == t) canon = e.name;
+        // Use ggml's canonical name so the CSV is consistent regardless of
+        // how the user spelled the requested type.
+        const char * canon = ggml_type_name(t);
+        if (!canon) canon = nm.c_str();
         targets.push_back({t, canon});
     }
     if (targets.empty()) {
