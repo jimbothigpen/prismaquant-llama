@@ -32,7 +32,14 @@ from pathlib import Path
 
 
 def load_costs(path: str) -> dict:
-    """Returns {tensor_name: {format: (mse, size_bytes, n_elements, bpw)}}."""
+    """Returns {tensor_name: {format: (mse, size_bytes, n_elements, bpw)}}.
+
+    Normalizes the `fmt` column to uppercase so format keys match cfg.quants,
+    --allow-types, --mtp-format, etc. (all uppercase by convention).
+    llama-quantize-cost emits ggml's canonical type name (e.g. `q3_K`,
+    `bf16`, `iq4_kss`), which is case-mixed and would otherwise miss the
+    case-sensitive allow filter.
+    """
     by_tensor = defaultdict(dict)
     with open(path) as f:
         reader = csv.DictReader(f)
@@ -44,7 +51,7 @@ def load_costs(path: str) -> dict:
             sz  = int(r["size_bytes"])
             n   = int(r["n_elements"])
             bpw = float(r["bpw"])
-            by_tensor[r["tensor_name"]][r["fmt"]] = (mse, sz, n, bpw)
+            by_tensor[r["tensor_name"]][r["fmt"].upper()] = (mse, sz, n, bpw)
     return dict(by_tensor)
 
 
