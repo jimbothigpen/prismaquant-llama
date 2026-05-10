@@ -1092,9 +1092,9 @@ def cfg_from_args(args) -> Config:
         cfg.path = Path(args.path).expanduser().resolve()
     if args.quants is not None:
         cfg.quants = [q.strip().upper() for q in args.quants.split(",") if q.strip()]
-    if args.budget is not None:
+    if getattr(args, "budget", None) is not None:
         cfg.budget = args.budget
-    if args.priority is not None:
+    if getattr(args, "priority", None) is not None:
         cfg.priority = args.priority
     if args.ppl_chunks is not None:
         cfg.ppl_chunks = args.ppl_chunks
