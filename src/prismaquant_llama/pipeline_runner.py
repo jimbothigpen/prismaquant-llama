@@ -309,30 +309,55 @@ def stage_e_costs(cfg: Config, layout: Layout, bf16_path: Path,
     return costs
 
 
-def stage_f_bridge(cfg: Config, layout: Layout, probe_path: Path) -> Path:
-    """Stage F — bridge HF→GGUF tensor names."""
+def stage_f_bridge(cfg: Config, layout: Layout, probe_path: Path,
+                   safetensors_dir: Path) -> tuple[Path, Optional[Path]]:
+    """Stage F — bridge HF→GGUF tensor names. Returns (bridge_json, mtp_tensors_json|None).
+
+    Reads `num_hidden_layers` and `num_nextn_predict_layers` from the model's
+    HF config.json so the bridge can map mtp.* probe entries to their
+    GGUF block indices. When the model declares zero MTP layers the
+    bridge still runs without those flags and the mtp_tensors_json
+    return value is None.
+    """
     bridge = layout.work / "bridge.json"
+    mtp_tensors = layout.work / "mtp-tensors.json"
     if bridge.exists():
         _log(layout, "F", f"F. bridge.json cached (skip)")
-        return bridge
+        return bridge, (mtp_tensors if mtp_tensors.exists() else None)
     bridge_script = _bundled_script("bridge_probe_to_gguf.py")
     _log(layout, "F", f"F. bridging probe → {bridge}")
-    rc = _run(["python3", str(bridge_script),
-               "--probe", str(probe_path),
-               "--output", str(bridge),
-               "--aggregate", "sum",
-               "--unmapped-out", str(layout.work / "bridge-unmapped.json")],
-              layout.logs_dir / "stage-F.log",
-              env=subprocess_env(cfg))
+    cmd = ["python3", str(bridge_script),
+           "--probe", str(probe_path),
+           "--output", str(bridge),
+           "--aggregate", "sum",
+           "--unmapped-out", str(layout.work / "bridge-unmapped.json")]
+    has_mtp = False
+    config_json = safetensors_dir / "config.json"
+    if config_json.exists():
+        with open(config_json) as f:
+            hf_cfg = json.load(f)
+        text_cfg = hf_cfg.get("text_config", hf_cfg)
+        n_hidden = text_cfg.get("num_hidden_layers")
+        n_nextn = text_cfg.get("num_nextn_predict_layers", 0)
+        if n_hidden is not None and n_nextn:
+            has_mtp = True
+            cmd += ["--n-hidden-layers", str(n_hidden),
+                    "--n-nextn-layers", str(n_nextn),
+                    "--mtp-tensors-out", str(mtp_tensors)]
+            _log(layout, "F",
+                 f"F. MTP detected: n_hidden_layers={n_hidden}, "
+                 f"n_nextn_layers={n_nextn} — emitting mtp-tensors.json")
+    rc = _run(cmd, layout.logs_dir / "stage-F.log", env=subprocess_env(cfg))
     if rc != 0 or not bridge.exists():
         raise SystemExit(f"FAIL: F bridge exit={rc}")
-    return bridge
+    return bridge, (mtp_tensors if has_mtp and mtp_tensors.exists() else None)
 
 
 def stage_g_allocate(cfg: Config, layout: Layout,
                      bridge_path: Path, costs_path: Path,
                      bf16_path: Path, perf_file: Optional[Path],
-                     budget_gb: float, model_name: str) -> Path:
+                     budget_gb: float, model_name: str,
+                     mtp_tensors_path: Optional[Path] = None) -> Path:
     """Stage G — multi-choice knapsack allocation."""
     recipe = layout.recipes_dir / f"recipe-PQ{cfg.budget}-{cfg.priority}.json"
     if recipe.exists():
@@ -363,6 +388,11 @@ def stage_g_allocate(cfg: Config, layout: Layout,
     # Floor 4.0 bpw on attention weights to avoid 2/3-bit on QK^T-sensitive paths.
     floor = {r"^blk\..*\.attn_(q|k|v|qkv|gate|output)\.weight$": 4.0}
     cmd += ["--floor-bpw", json.dumps(floor)]
+    if mtp_tensors_path is not None and cfg.mtp_format:
+        cmd += ["--mtp-tensors", str(mtp_tensors_path),
+                "--mtp-format", cfg.mtp_format]
+        _log(layout, "G",
+             f"G. mtp override: pin {mtp_tensors_path.name} → {cfg.mtp_format}")
     rc = _run(cmd, layout.logs_dir / "stage-G.log", env=subprocess_env(cfg))
     if rc != 0 or not recipe.exists():
         raise SystemExit(f"FAIL: G allocator exit={rc}")
@@ -926,11 +956,13 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
     # E–H
     costs_path = stage_e_costs(cfg, layout, bf16_path, imatrix_path)
     purge_ctx.costs_path = costs_path     # for --purge yes cleanup of shared cache
-    bridge_path = stage_f_bridge(cfg, layout, probe_path)
+    bridge_path, mtp_tensors_path = stage_f_bridge(cfg, layout, probe_path,
+                                                    safetensors_dir)
     perf_file = find_perf_file(layout, resolved.model_name)
     recipe_path = stage_g_allocate(cfg, layout, bridge_path, costs_path,
                                     bf16_path, perf_file, budget_gb,
-                                    resolved.model_name)
+                                    resolved.model_name,
+                                    mtp_tensors_path=mtp_tensors_path)
     final_gguf = stage_h_quantize(cfg, layout, bf16_path, recipe_path,
                                    imatrix_path, resolved.model_name)
 

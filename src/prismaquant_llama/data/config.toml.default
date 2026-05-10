@@ -127,6 +127,24 @@ reference_format = "bf16"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# mtp_format — format to assign to MTP / NEXTN tensors (multi-token-prediction
+# head, present in Qwen3.5/3.6 and similar models). Only takes effect when
+# the source model declares num_nextn_predict_layers > 0; otherwise the
+# allocator's normal solve picks the format and this key is unused.
+#
+# Why a per-MTP override exists: speculative-decode acceptance rates are
+# disproportionately sensitive to MTP-tensor quantization, and the
+# acceptance impact has not been measured for sub-BF16 MTP weights. Until
+# that's validated for your inference stack, keep MTP at BF16. Once you
+# have measurements showing acceptable acceptance under e.g. Q8_0 MTP,
+# set this to that format and re-run.
+#
+# Any format name in `quants` (or BF16) is accepted.
+# ──────────────────────────────────────────────────────────────────────────────
+mtp_format = "BF16"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # budget — target final GGUF size as a percentage of the BF16 GGUF size.
 # Reference points (approximate, model-dependent):
 #   - Q8_0    → ~50%

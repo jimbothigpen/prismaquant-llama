@@ -536,6 +536,28 @@ def bisect_lambda(fisher: dict, costs: dict, pinned: dict, budget_bytes: int,
     return best
 
 
+def apply_mtp_format_override(recipe: dict[str, str],
+                              mtp_tensor_names: set[str],
+                              mtp_format: str) -> tuple[dict[str, str], int]:
+    """Force any tensor in mtp_tensor_names to mtp_format.
+
+    Mirrors prismaquant/allocator.py::apply_mtp_format_override (upstream
+    commit fad96d6). The use case is keeping multi-token-prediction
+    weights at a recipe-level format (e.g. BF16) until speculative-decode
+    acceptance has been measured for quantized MTP, since MTP layers
+    are disproportionately sensitive.
+
+    Returns (new_recipe, n_overridden).
+    """
+    out = dict(recipe)
+    n = 0
+    for name in list(out.keys()):
+        if name in mtp_tensor_names:
+            out[name] = mtp_format
+            n += 1
+    return out, n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bridge", required=True)
@@ -569,6 +591,17 @@ def main():
     ap.add_argument("--tps", default=None,
                     help="JSON file with per-format {pp, tg} TPS values for the "
                          "speed terms. Required when --priority weights TG or PP.")
+    ap.add_argument("--mtp-tensors", default=None,
+                    help="Optional JSON file (list of GGUF tensor names) listing "
+                         "MTP-derived tensors. Produced by bridge_probe_to_gguf.py "
+                         "--mtp-tensors-out. When set together with --mtp-format, "
+                         "those tensors are pinned to --mtp-format after the main "
+                         "allocation. Mirrors upstream prismaquant's MTP override.")
+    ap.add_argument("--mtp-format", default=None,
+                    help="Format to assign to every tensor in --mtp-tensors. "
+                         "BF16 is the production default until MTP "
+                         "speculative-decode acceptance is validated for "
+                         "quantized MTP weights. Ignored if --mtp-tensors absent.")
     ap.add_argument("--budget-band-gb", type=float, default=0.25,
                     help="Acceptance band around budget. The bisection accepts "
                          "any recipe whose size falls in [budget-band, "
@@ -707,6 +740,40 @@ def main():
           f"budget={args.budget_gb:.2f}±{args.budget_band_gb:.2f} GB  "
           f"Δ={delta_gb:+.2f} GB ({band_marker})  loss-surrogate={total_loss:.6e}",
           flush=True)
+
+    if args.mtp_tensors and args.mtp_format:
+        with open(args.mtp_tensors) as f:
+            mtp_names = set(json.load(f))
+        recipe, n_overridden = apply_mtp_format_override(recipe, mtp_names,
+                                                         args.mtp_format)
+        if n_overridden:
+            # Post-override size accounting silently skips (tensor, format)
+            # pairs that aren't in the costs CSV (the user's `quants` list
+            # often won't include BF16). The recipe.txt is still correct —
+            # llama-quantize handles BF16 directly — but the printed size
+            # under-counts these tensors. Warn loudly so out-of-band figures
+            # are not mistaken for a real budget overshoot.
+            missing = [n for n in mtp_names
+                       if n in recipe and (n not in costs
+                                            or recipe[n] not in costs[n])]
+            total_size, total_loss = _recompute_size_loss(recipe, costs, fisher)
+            delta_gb = (total_size - args.budget_gb * (1024 ** 3)) / (1024 ** 3)
+            print(f"[allocator] mtp override: pinned {n_overridden} tensors to "
+                  f"{args.mtp_format}; post-override size="
+                  f"{total_size/(1024**3):.2f} GB (Δ={delta_gb:+.2f} GB)",
+                  flush=True)
+            if missing:
+                print(f"[allocator] mtp override: WARNING — {len(missing)} of "
+                      f"the pinned tensors lack a {args.mtp_format} entry in "
+                      f"the costs CSV; their bytes are not counted in the "
+                      f"size figure above. recipe.txt is still correct.",
+                      flush=True)
+        else:
+            print(f"[allocator] mtp override: no matching tensors in recipe "
+                  f"(list had {len(mtp_names)} names)", flush=True)
+    elif bool(args.mtp_tensors) != bool(args.mtp_format):
+        print(f"[allocator] WARNING: --mtp-tensors and --mtp-format must be "
+              f"used together; ignoring", flush=True)
 
     # Format distribution
     fmt_counts = defaultdict(int)

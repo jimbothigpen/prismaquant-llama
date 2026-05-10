@@ -50,6 +50,12 @@ class Config:
     imatrix_chunks: int
     convert_script: Optional[Path]  # path to convert_hf_to_gguf.py; None ⇒ search
     libs: Optional[Path]            # extra dir prepended to LD_LIBRARY_PATH; None ⇒ no override
+    mtp_format: str = "BF16"        # format to pin MTP/NEXTN tensors to.
+                                    # Applied by the allocator when the model has
+                                    # MTP layers (num_nextn_predict_layers > 0).
+                                    # BF16 is the production default until
+                                    # speculative-decode acceptance is validated
+                                    # for quantized MTP weights.
     reference_format: str = "bf16"  # "bf16" (default) or "f16"; controls Stage B
                                     # outtype + the calibration's reference for
                                     # Δppl / pp/tg ratios. Use "f16" on backends
@@ -146,6 +152,8 @@ def load_config(config_path: Optional[Path] = None,
             f"config 'reference_format' must be 'bf16' or 'f16'; got "
             f"{reference_format!r}")
 
+    mtp_format = str(section.get("mtp_format") or "BF16").strip().upper()
+
     # libs: CLI --libs > [prismaquant-llama] libs > None.
     if libs is not None:
         libs_resolved = Path(libs).expanduser().resolve()
@@ -169,6 +177,7 @@ def load_config(config_path: Optional[Path] = None,
         convert_script=convert_script,
         libs=libs_resolved,
         reference_format=reference_format,
+        mtp_format=mtp_format,
         config_path=config_path,
     )
 
