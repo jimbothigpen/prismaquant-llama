@@ -225,6 +225,23 @@ def main():
     print(f"[bridge] expert_saliency entries: "
           f"{sum(len(v) for v in probe.get('expert_saliency', {}).values())}", flush=True)
 
+    # Auto-detect n_nextn_layers from probe contents: count unique
+    # mtp.layers.<N>. indices in stats. Overrides --n-nextn-layers when the
+    # probe is self-describing (which it normally is — the probe has already
+    # scanned the safetensors index for MTP layers via prismaquant's own
+    # safetensors fallback). The CLI flag remains as a manual override for
+    # edge cases (e.g. probes with mtp.fc but no mtp.layers.* — rare).
+    detected_nextn = 0
+    for hf_name in stats:
+        m = re.match(r"^mtp\.layers\.(\d+)\.", hf_name)
+        if m:
+            detected_nextn = max(detected_nextn, int(m.group(1)) + 1)
+    if detected_nextn > 0 and detected_nextn != args.n_nextn_layers:
+        print(f"[bridge] auto-detected n_nextn_layers={detected_nextn} from "
+              f"probe stats (overrides --n-nextn-layers={args.n_nextn_layers})",
+              flush=True)
+        args.n_nextn_layers = detected_nextn
+
     h_trace_per_gguf: dict[str, list[float]] = defaultdict(list)
     mtp_emitted: set[str] = set()
     unmapped: list[str] = []

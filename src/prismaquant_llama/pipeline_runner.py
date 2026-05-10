@@ -331,26 +331,42 @@ def stage_f_bridge(cfg: Config, layout: Layout, probe_path: Path,
            "--output", str(bridge),
            "--aggregate", "sum",
            "--unmapped-out", str(layout.work / "bridge-unmapped.json")]
-    has_mtp = False
     config_json = safetensors_dir / "config.json"
+    n_hidden: Optional[int] = None
+    n_nextn = 0
     if config_json.exists():
         with open(config_json) as f:
             hf_cfg = json.load(f)
         text_cfg = hf_cfg.get("text_config", hf_cfg)
-        n_hidden = text_cfg.get("num_hidden_layers")
-        n_nextn = text_cfg.get("num_nextn_predict_layers", 0)
-        if n_hidden is not None and n_nextn:
-            has_mtp = True
-            cmd += ["--n-hidden-layers", str(n_hidden),
-                    "--n-nextn-layers", str(n_nextn),
-                    "--mtp-tensors-out", str(mtp_tensors)]
-            _log(layout, "F",
-                 f"F. MTP detected: n_hidden_layers={n_hidden}, "
-                 f"n_nextn_layers={n_nextn} — emitting mtp-tensors.json")
+        n_hidden = text_cfg.get("num_hidden_layers") or hf_cfg.get("num_hidden_layers")
+        # Tolerate `null` / missing — Qwen/Qwen3.5-4B's upstream config has
+        # no num_nextn_predict_layers despite shipping mtp.* weights. The
+        # bridge auto-detects n_nextn from probe contents in that case.
+        n_nextn = (text_cfg.get("num_nextn_predict_layers")
+                   or hf_cfg.get("num_nextn_predict_layers")
+                   or 0)
+    if n_hidden is not None:
+        cmd += ["--n-hidden-layers", str(n_hidden),
+                "--mtp-tensors-out", str(mtp_tensors)]
+        if n_nextn:
+            cmd += ["--n-nextn-layers", str(n_nextn)]
+        _log(layout, "F",
+             f"F. MTP-aware bridge: n_hidden_layers={n_hidden}, "
+             f"n_nextn_layers={n_nextn or 'auto'} (bridge no-ops if probe "
+             f"has no mtp.* entries)")
     rc = _run(cmd, layout.logs_dir / "stage-F.log", env=subprocess_env(cfg))
     if rc != 0 or not bridge.exists():
         raise SystemExit(f"FAIL: F bridge exit={rc}")
-    return bridge, (mtp_tensors if has_mtp and mtp_tensors.exists() else None)
+    # The sidecar may exist but be empty (e.g. text-only models); only return
+    # it when it has at least one MTP tensor name.
+    if mtp_tensors.exists():
+        try:
+            mtp_list = json.loads(mtp_tensors.read_text())
+        except Exception:
+            mtp_list = []
+        if mtp_list:
+            return bridge, mtp_tensors
+    return bridge, None
 
 
 def stage_g_allocate(cfg: Config, layout: Layout,
