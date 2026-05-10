@@ -163,12 +163,21 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
 
     # E: costs; F: bridge
     costs_path = pr.stage_e_costs(cfg, layout, bf16_path, imatrix_path)
-    bridge_path = pr.stage_f_bridge(cfg, layout, probe_path)
+    bridge_path, mtp_tensors_path = pr.stage_f_bridge(cfg, layout, probe_path,
+                                                      safetensors_dir)
 
     # Load allocator inputs
     sys.path.insert(0, str(_bundled_script_path("allocator.py").parent))
     from allocator import (load_costs, parse_priority, compute_norms,
-                            bisect_lambda, read_gguf_tensor_meta)
+                            bisect_lambda, read_gguf_tensor_meta,
+                            apply_mtp_format_override, _recompute_size_loss)
+
+    mtp_names: set[str] = set()
+    if mtp_tensors_path is not None and cfg.mtp_format:
+        with open(mtp_tensors_path) as f:
+            mtp_names = set(json.load(f))
+        print(f"[explore] mtp override active: {len(mtp_names)} tensor(s) "
+              f"will be pinned to {cfg.mtp_format} per cell", flush=True)
 
     raw_costs = load_costs(str(costs_path))
     with bridge_path.open() as f:
@@ -204,6 +213,11 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
                 fisher, costs, pinned, budget_bytes,
                 weights=weights, tps=perf, norms=norms,
                 band_bytes=int(0.25 * 1024**3))
+
+            if mtp_names:
+                recipe, _ = apply_mtp_format_override(recipe, mtp_names,
+                                                      cfg.mtp_format)
+                total_size, total_loss = _recompute_size_loss(recipe, costs, fisher)
 
             pred_dppl, pred_tg, pred_pp, _ = _predict_metrics(recipe, costs, perf)
 
