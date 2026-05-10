@@ -163,7 +163,7 @@ def convert_to_bf16(cfg: Config, layout: Layout,
         return out
     convert_script = _find_convert_script(cfg)
     _log(layout, "B", f"B. converting {safetensors_dir} → {out}")
-    rc = _run(["python3", str(convert_script), str(safetensors_dir),
+    rc = _run([sys.executable, str(convert_script), str(safetensors_dir),
                "--outtype", cfg.reference_format, "--outfile", str(out)],
               layout.logs_dir / "stage-B.log",
               env=subprocess_env(cfg))
@@ -209,7 +209,7 @@ def stage_c_probe(cfg: Config, layout: Layout, safetensors_dir: Path,
         _log(layout, "C", f"C. probe cached at {probe_path} (skip)")
         return probe_path
     _log(layout, "C", f"C. running prismaquant.incremental_probe on {safetensors_dir}")
-    rc = _run(["python3", "-m", "prismaquant.incremental_probe",
+    rc = _run([sys.executable, "-m", "prismaquant.incremental_probe",
                "--model", str(safetensors_dir),
                "--dataset", str(imatrix_corpus),
                "--nsamples", "16", "--seqlen", "512",
@@ -326,7 +326,7 @@ def stage_f_bridge(cfg: Config, layout: Layout, probe_path: Path,
         return bridge, (mtp_tensors if mtp_tensors.exists() else None)
     bridge_script = _bundled_script("bridge_probe_to_gguf.py")
     _log(layout, "F", f"F. bridging probe → {bridge}")
-    cmd = ["python3", str(bridge_script),
+    cmd = [sys.executable, str(bridge_script),
            "--probe", str(probe_path),
            "--output", str(bridge),
            "--aggregate", "sum",
@@ -386,7 +386,7 @@ def stage_g_allocate(cfg: Config, layout: Layout,
         "token_embd.weight": "Q8_0",
     }, indent=2))
     _log(layout, "G", f"G. allocating @ {budget_gb:.2f} GB priority {cfg.priority}")
-    cmd = ["python3", str(allocator),
+    cmd = [sys.executable, str(allocator),
            "--bridge", str(bridge_path),
            "--costs", str(costs_path),
            "--budget-gb", str(budget_gb),
