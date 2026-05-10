@@ -277,12 +277,21 @@ def stage_e_costs(cfg: Config, layout: Layout, bf16_path: Path,
     cost_bin = find_tool(cfg, "llama-quantize-cost")
     exemplars = _auto_pick_exemplars(bf16_path)
     top_level = _discover_top_level_weights(bf16_path)
-    layer_alt = "|".join(str(L) for L in exemplars)
+    mtp_blocks = _discover_mtp_blocks(bf16_path)
+    # MTP blocks (any blk.<N>.nextn.* tensor present) carry MTP-unique
+    # tensors like nextn.eh_proj that have no body sibling for shape-based
+    # propagation. Include them as direct-measure targets so the allocator
+    # has costs for the MTP recipe entries (and so the MTP override can
+    # actually flip them to BF16 in the recipe).
+    layer_idxs = sorted(set(exemplars) | set(mtp_blocks))
+    layer_alt = "|".join(str(L) for L in layer_idxs)
     top_alt = "|".join(top_level)
     include_regex = rf"^({top_alt}|blk\.({layer_alt}))\."
     _log(layout, "E", f"E. measuring per-(tensor, format) MSE → {costs}")
     _log(layout, "E", f"E. top-level weights: {top_level}")
     _log(layout, "E", f"E. exemplar layers: {exemplars}")
+    if mtp_blocks:
+        _log(layout, "E", f"E. MTP blocks (direct-measure): {mtp_blocks}")
 
     # Atomic write: quantize-cost emits to .tmp, rename on success.
     costs.parent.mkdir(parents=True, exist_ok=True)
@@ -496,6 +505,31 @@ def _auto_pick_exemplars(bf16_path: Path) -> list[int]:
     except Exception as e:
         print(f"  WARN: exemplar auto-detect failed ({e}); using [0, 3]")
         return [0, 3]
+
+
+def _discover_mtp_blocks(bf16_path: Path) -> list[int]:
+    """Find block indices that contain MTP-unique tensors (`blk.<N>.nextn.*`)
+    in the BF16 GGUF. The presence of nextn.eh_proj / nextn.shared_head_norm
+    / etc. is the unambiguous MTP-block signature; the standard attn_/ffn_
+    tensors at those indices share shape with body softmax-attn layers and
+    would not be distinguished by `detect_layer_types` alone."""
+    try:
+        sys.path.insert(0, str(_bundled_script("allocator.py").parent))
+        from allocator import read_gguf_tensor_meta
+        meta = read_gguf_tensor_meta(str(bf16_path))
+        mtp_idxs: set[int] = set()
+        for tn in meta:
+            if not tn.startswith("blk."):
+                continue
+            parts = tn.split(".", 3)
+            if len(parts) < 4 or not parts[1].isdigit():
+                continue
+            if parts[2] == "nextn":
+                mtp_idxs.add(int(parts[1]))
+        return sorted(mtp_idxs)
+    except Exception as e:
+        print(f"  WARN: MTP-block discovery failed ({e}); skipping")
+        return []
 
 
 def _discover_top_level_weights(bf16_path: Path) -> list[str]:
