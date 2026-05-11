@@ -132,7 +132,12 @@ def stage_fp_precondition(
                  f"bpw_floor = {cfg.precondition_bpw_floor}")
 
     recipe_data = json.loads(recipe_path.read_text())
-    assignments = recipe_data.get("assignments") or recipe_data
+    # Bundled allocator wraps the per-tensor map under "recipe"; older
+    # callers and the legacy explore-style JSON use "assignments"; fall back
+    # to the top-level dict only when neither key is present.
+    assignments = (recipe_data.get("recipe")
+                   or recipe_data.get("assignments")
+                   or recipe_data)
 
     costs_bpw = _load_costs_bpw(costs_path)
 
