@@ -288,25 +288,29 @@ libs = ""
 # ──────────────────────────────────────────────────────────────────────────────
 # [precondition] — Stage F+, between G (allocator) and H (quantize).
 #
-# F+ applies activation-aware pre-conditioning passes (AWQ channel rescale,
-# GPTQ rounding, scale-sweep, HALO rotation) to BF16 weights of tensors whose
-# allocator-chosen format is at or above `bpw_floor`. The literal "disable
-# below 4 bits" caveat falls out of the threshold: tensors that landed at
-# IQ3 / Q3 / Q2 / etc. pass through unchanged.
+# F+ applies activation-aware pre-conditioning passes (currently: AWQ channel
+# rescale) to BF16 weights of tensors whose allocator-chosen format is at or
+# above `bpw_floor`. The literal "disable below 4 bits" caveat falls out of
+# the threshold: tensors that landed at IQ3 / Q3 / Q2 / etc. pass through
+# unchanged.
 #
-# CURRENT PHASE: P1 — skeleton only. `mode = "on"` walks the recipe, records
-# per-tensor decisions in `work/<run>/precondition.json`, and produces a
-# passthrough `<model>-BF16-pc.gguf` (hardlink of the source BF16). No weights
-# are modified yet. Real method primitives arrive in P2 (AWQ), P3 (+GPTQ),
-# P4 (+scale-sweep), P5 (+HALO).
+# CURRENT PHASE: P2 (AWQ) shipped. P3 (GPTQ on top of AWQ) was prototyped
+# 2026-05-11 and shelved — the simulator-grid mismatch vs llama-quantize's
+# k-quant codebook caused a net PPL regression (+10.5% on Qwen3.5-4B PQ32-111).
+# See ~/kernel-work/prismaquant-llama-docs/preconditioning-p3-result.md.
+# The gptq_apply pure-math primitive is preserved at scripts/gptq_apply.py
+# for a future revival with a k-quant-aware simulator. P4 (scale-sweep) and
+# P5 (HALO) are also future work.
 #
-# CLI overrides: `--precondition off|on`, `--precondition-bpw-floor 4.0`.
+# CLI overrides: `--precondition off|awq`, `--precondition-bpw-floor 4.0`.
 # ──────────────────────────────────────────────────────────────────────────────
 [precondition]
 
-# mode — "off" (default) skips Stage F+ entirely; "on" enables the P1
-# skeleton (manifest + passthrough pc-GGUF; no weight changes yet). Future
-# phases will accept "awq", "awq+gptq", "awq+gptq+sweep", "halo".
+# mode — which method stack runs in Stage F+.
+#   "off"   (default) skip Stage F+ entirely (pc-bf16 == source bf16).
+#   "awq"   AWQ proper-fold pass (P2): per-input-channel scale with γ-fold
+#           into the predecessor RMSNorm. Mathematically identity-preserving;
+#           redistributes weight magnitudes favorably for group-quantizers.
 mode = "off"
 
 # bpw_floor — chosen-format bits-per-weight below which F+ skips the tensor.

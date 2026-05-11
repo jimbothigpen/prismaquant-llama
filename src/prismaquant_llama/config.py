@@ -26,6 +26,13 @@ from typing import Optional
 # inside this file (chicken-and-egg).
 DEFAULT_CONFIG_PATH = Path.home() / ".prismaquant-llama" / "config.toml"
 
+# Valid `[precondition].mode` values. Kept module-level so cli.py and
+# pipeline_runner.py can reuse for argparse `choices=` without redefining.
+# "awq+gptq" was prototyped (P3) on 2026-05-11 and shelved — see preconditioning-
+# p3-result.md. The pure-math gptq_apply primitive is preserved in scripts/
+# gptq_apply.py for a future revival with a k-quant-aware simulator.
+VALID_PRECONDITION_MODES = frozenset({"off", "awq"})
+
 # Package-data resources.
 _DATA_DIR = Path(__file__).parent / "data"
 SHIPPED_CONFIG = _DATA_DIR / "config.toml.default"
@@ -65,11 +72,11 @@ class Config:
                                     # retain their legacy names for backward
                                     # compatibility regardless of this setting.
 
-    # Stage F+ (pre-conditioning) — P1 skeleton. `mode` is "off" (no F+ stage)
-    # or "on" (P1 stub: walk recipe, produce manifest + passthrough pc-GGUF, no
-    # weight math). P2-P5 will introduce method-named modes ("awq", "awq+gptq",
-    # ...). `bpw_floor` is the chosen-format bits-per-weight below which F+
-    # skips the tensor — the literal enforcement of "disable below 4 bits".
+    # Stage F+ (pre-conditioning). `mode` selects the method stack:
+    #   "off"   — skip F+ entirely (pc-bf16 == source bf16).
+    #   "awq"   — AWQ proper-fold pass only (P2).
+    # `bpw_floor` is the chosen-format bits-per-weight below which F+ skips the
+    # tensor — the literal enforcement of "disable below 4 bits".
     precondition_mode: str = "off"
     precondition_bpw_floor: float = 4.0
 
@@ -168,9 +175,10 @@ def load_config(config_path: Optional[Path] = None,
     precondition_section = data.get("precondition", {}) or {}
     precondition_mode = str(
         precondition_section.get("mode") or "off").strip().lower()
-    if precondition_mode not in ("off", "on"):
+    if precondition_mode not in VALID_PRECONDITION_MODES:
+        valid = ", ".join(sorted(VALID_PRECONDITION_MODES))
         raise ValueError(
-            f"[precondition] mode must be 'off' or 'on' in P1; got "
+            f"[precondition] mode must be one of {{{valid}}}; got "
             f"{precondition_mode!r}")
     try:
         precondition_bpw_floor = float(
@@ -179,6 +187,8 @@ def load_config(config_path: Optional[Path] = None,
         raise ValueError(
             f"[precondition] bpw_floor must be a number; got "
             f"{precondition_section.get('bpw_floor')!r}")
+    # gptq_lambda / gptq_block_size keys may linger in user configs from the
+    # shelved P3 prototype — silently ignore (don't error on extras).
 
     # libs: CLI --libs > [prismaquant-llama] libs > None.
     if libs is not None:
@@ -208,6 +218,22 @@ def load_config(config_path: Optional[Path] = None,
         precondition_bpw_floor=precondition_bpw_floor,
         config_path=config_path,
     )
+
+
+def precondition_methods(mode: str) -> list[str]:
+    """Parse a precondition mode string into an ordered method list.
+
+    "off"   → []
+    "awq"   → ["awq"]
+    """
+    m = (mode or "").strip().lower()
+    if m == "off":
+        return []
+    if m not in VALID_PRECONDITION_MODES:
+        raise ValueError(
+            f"unknown precondition mode {mode!r}; "
+            f"valid: {sorted(VALID_PRECONDITION_MODES)}")
+    return m.split("+")
 
 
 def _expand_path(s: str) -> Path:

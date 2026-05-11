@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import (Config, load_config, find_tool, subprocess_env,
-                     resolve_corpus, LLAMA_TOOLS)
+                     resolve_corpus, LLAMA_TOOLS, VALID_PRECONDITION_MODES)
 from .input_resolver import ResolvedInput, resolve as resolve_input
 from .paths import Layout, wipe_model_artifacts
 
@@ -1208,13 +1208,13 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                         "the model calibration JSON) so the entire pipeline "
                         "is recomputed from scratch. Use after a llama.cpp "
                         "bugfix that invalidates prior outputs.")
-    p.add_argument("--precondition", choices=("off", "on"), default=None,
-                   help="Stage F+ pre-conditioning (P1: skeleton only — walks "
-                        "the recipe, writes a manifest, and produces a "
-                        "passthrough <model>-BF16-pc.gguf; no weight math). "
+    p.add_argument("--precondition",
+                   choices=tuple(sorted(VALID_PRECONDITION_MODES)),
+                   default=None,
+                   help="Stage F+ pre-conditioning method stack. "
+                        "'off' skips F+; 'awq' runs AWQ proper-fold (P2). "
                         "Default: from [precondition].mode in config "
-                        "(typically 'off'). Future phases add awq / "
-                        "awq+gptq / awq+gptq+sweep / halo modes.")
+                        "(typically 'off').")
     p.add_argument("--precondition-bpw-floor", type=float, default=None,
                    help="Skip F+ for any tensor whose chosen-format bpw is "
                         "below this threshold — the literal 'disable below 4 "

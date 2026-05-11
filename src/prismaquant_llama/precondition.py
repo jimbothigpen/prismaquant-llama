@@ -6,18 +6,26 @@ Reads the recipe + costs CSV, decides per-tensor whether the chosen format is
 at or above the bpw floor, records the decision in a manifest, and produces a
 preconditioned BF16 GGUF that Stage H consumes.
 
-P2 status: AWQ proper-fold pass on ≥4-bit Q/K/V (softmax-attn layers) and
-gate/up (every layer), folding 1/s into the predecessor RMSNorm γ. Math
-identity preserved per fold by applying s to every reader of γ.
+Method stack is driven by `cfg.precondition_mode`:
 
-Conservative interpretation of "disable below 4 bits": a fold is SKIPPED
-for the layer if any reader of γ is sub-floor or is missing activation
-cache. The companion-rescale of a sub-floor reader (per prismaquant's
-`_awq_fold_layer_predecessors`) is intentionally not used here.
+  "off"   — passthrough (returns the source BF16 unchanged).
+  "awq"   — AWQ proper-fold pass (P2). Per-input-channel scale s with γ-fold
+            into the predecessor RMSNorm. Mathematically identity-preserving;
+            redistributes weight magnitudes favorably for group-quantizers.
+            Conservative "disable below 4 bits": a fold is SKIPPED for the
+            layer if any reader of γ is sub-floor or is missing activation
+            cache.
 
-P3-P5 (GPTQ / scale-sweep / HALO) will compose on top of P2's pc-bf16.
-
-
+NOTE on P3 (GPTQ): a P3 path layering GPTQ on top of AWQ was prototyped on
+2026-05-11 and shelved. The GPTQ math is mathematically correct (reduces
+H-weighted MSE 10-100× vs RTN), but its simulator grid (uniform-RTN at the
+target bits, fixed block_size) does not match llama-quantize's k-quant
+nested-scale codebook. The corrections it computes for the simulator grid
+get re-rounded by llama-quantize's actual k-quant pass, undoing the gain
+and adding noise on top. 4B PQ32-111 PPL went from P2's 9.4004 to 10.3895
+(+10.5%). The pure-math primitive at scripts/gptq_apply.py is preserved
+for a future Path A that ports k-quant's exact codebook into Python.
+See ~/kernel-work/prismaquant-llama-docs/preconditioning-p3-result.md.
 """
 
 from __future__ import annotations
@@ -35,7 +43,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from .config import Config
+from .config import Config, precondition_methods
 from .paths import Layout
 from .scripts.awq_apply import (
     awq_joint_channel_scale,
@@ -460,6 +468,10 @@ def stage_fp_precondition(
             f"F+ needs activation cache at {act_cache_dir} (stage C output) "
             f"but the directory is missing")
 
+    # Method stack: ["awq"] (or [] for off, handled above).
+    methods = precondition_methods(cfg.precondition_mode)
+    _log(layout, f"F+. method stack: {methods}")
+
     # Build the per-layer fold plan from the recipe + GGUF tensor list.
     plan = _build_fold_plan(hdr, bpw_by_tensor, cfg.precondition_bpw_floor,
                              act_cache_dir, log_fn)
@@ -525,6 +537,7 @@ def stage_fp_precondition(
         "schema": 2,
         "phase": "P2",
         "precondition_mode": cfg.precondition_mode,
+        "methods": methods,
         "bpw_floor": cfg.precondition_bpw_floor,
         "source_bf16": str(bf16_path),
         "preconditioned_bf16": str(pc_path),
