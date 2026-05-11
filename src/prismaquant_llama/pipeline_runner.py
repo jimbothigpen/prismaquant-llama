@@ -425,23 +425,82 @@ def stage_g_allocate(cfg: Config, layout: Layout,
     return recipe
 
 
+_H_CACHEKEY_VERSION = 1
+
+
+def _h_input_descriptor(path: Path) -> dict:
+    """Stat-cheap + SHA-correct descriptor for a Stage-H input file.
+    Stat sig lets us short-circuit re-hashing when the file is byte-identical
+    on the same inode; SHA is the source of truth on stat-mismatch."""
+    st = path.stat()
+    return {
+        "path": str(path),
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+        "sha256": _file_sha256(path),
+    }
+
+
+def _h_descriptor_matches(cached: dict, path: Path) -> bool:
+    """Compare a previously-stored descriptor against current path state.
+    Returns True iff content is provably equivalent (SHA match)."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return False
+    if cached.get("size") == st.st_size and cached.get("mtime_ns") == st.st_mtime_ns:
+        return True  # stat-identity is strong enough to skip re-hash
+    return cached.get("sha256") == _file_sha256(path)
+
+
+def _h_materialize_recipe_txt(recipe_path: Path) -> Path:
+    """Stage G normally emits both recipe.json and recipe.txt; this dead-code
+    path only fires if a caller hands us a JSON without its txt sibling."""
+    recipe_txt = recipe_path.with_suffix(".txt")
+    if recipe_txt.exists():
+        return recipe_txt
+    data = json.loads(recipe_path.read_text())
+    assignments = data.get("recipe") or data.get("assignments") or data
+    with recipe_txt.open("w") as f:
+        for tensor, fmt in assignments.items():
+            if isinstance(fmt, dict):
+                fmt = fmt.get("type") or fmt.get("format")
+            f.write(f"{tensor}={fmt}\n")
+    return recipe_txt
+
+
 def stage_h_quantize(cfg: Config, layout: Layout, bf16_path: Path,
                      recipe_path: Path, imatrix_path: Path,
                      model_name: str) -> Path:
-    """Stage H — apply allocation."""
+    """Stage H — apply allocation.
+
+    Caches by input identity (bf16, imatrix, recipe-txt) via a sidecar
+    cachekey.json, so a precondition rerun against the same output filename
+    correctly invalidates a stale baseline GGUF written by an earlier run.
+    """
     out = layout.gguf_output_path(model_name, cfg.budget, cfg.priority)
-    if out.exists():
-        _log(layout, "H", f"H. GGUF cached at {out} (skip)")
-        return out
-    recipe_txt = recipe_path.with_suffix(".txt")
-    if not recipe_txt.exists():
-        data = json.loads(recipe_path.read_text())
-        assignments = data.get("assignments") or data
-        with recipe_txt.open("w") as f:
-            for tensor, fmt in assignments.items():
-                if isinstance(fmt, dict):
-                    fmt = fmt.get("type") or fmt.get("format")
-                f.write(f"{tensor}={fmt}\n")
+    recipe_txt = _h_materialize_recipe_txt(recipe_path)
+    sidecar = out.parent / (out.name + ".cachekey.json")
+
+    if out.exists() and sidecar.exists():
+        try:
+            stored = json.loads(sidecar.read_text())
+        except (json.JSONDecodeError, OSError):
+            stored = None
+        if (stored
+                and stored.get("version") == _H_CACHEKEY_VERSION
+                and stored.get("out_default_quant") == "Q4_K"
+                and _h_descriptor_matches(stored.get("bf16", {}), bf16_path)
+                and _h_descriptor_matches(stored.get("imatrix", {}), imatrix_path)
+                and _h_descriptor_matches(stored.get("recipe_txt", {}), recipe_txt)):
+            _log(layout, "H", f"H. GGUF cached at {out} (skip, cachekey match)")
+            return out
+        _log(layout, "H",
+             f"H. cachekey mismatch at {sidecar.name}; rebuilding {out.name}")
+    elif out.exists():
+        _log(layout, "H",
+             f"H. no cachekey sidecar for existing {out.name}; rebuilding")
+
     quantize_bin = find_tool(cfg, "llama-quantize")
     _log(layout, "H", f"H. applying recipe → {out}")
     rc = _run([str(quantize_bin),
@@ -452,6 +511,14 @@ def stage_h_quantize(cfg: Config, layout: Layout, bf16_path: Path,
               env=subprocess_env(cfg))
     if rc != 0 or not out.exists():
         raise SystemExit(f"FAIL: H llama-quantize exit={rc}")
+
+    sidecar.write_text(json.dumps({
+        "version": _H_CACHEKEY_VERSION,
+        "out_default_quant": "Q4_K",
+        "bf16": _h_input_descriptor(bf16_path),
+        "imatrix": _h_input_descriptor(imatrix_path),
+        "recipe_txt": _h_input_descriptor(recipe_txt),
+    }, indent=2))
     _log(layout, "H", f"H. final GGUF: {out} ({out.stat().st_size/1024**3:.2f} GB)")
     return out
 
