@@ -65,6 +65,14 @@ class Config:
                                     # retain their legacy names for backward
                                     # compatibility regardless of this setting.
 
+    # Stage F+ (pre-conditioning) — P1 skeleton. `mode` is "off" (no F+ stage)
+    # or "on" (P1 stub: walk recipe, produce manifest + passthrough pc-GGUF, no
+    # weight math). P2-P5 will introduce method-named modes ("awq", "awq+gptq",
+    # ...). `bpw_floor` is the chosen-format bits-per-weight below which F+
+    # skips the tensor — the literal enforcement of "disable below 4 bits".
+    precondition_mode: str = "off"
+    precondition_bpw_floor: float = 4.0
+
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -154,6 +162,24 @@ def load_config(config_path: Optional[Path] = None,
 
     mtp_format = str(section.get("mtp_format") or "BF16").strip().upper()
 
+    # Stage F+ lives in its own top-level [precondition] table for room to
+    # grow as P2-P5 add method-specific knobs (awq strategy, gptq damping,
+    # halo seed, etc.). Missing table → defaults (mode=off, bpw_floor=4.0).
+    precondition_section = data.get("precondition", {}) or {}
+    precondition_mode = str(
+        precondition_section.get("mode") or "off").strip().lower()
+    if precondition_mode not in ("off", "on"):
+        raise ValueError(
+            f"[precondition] mode must be 'off' or 'on' in P1; got "
+            f"{precondition_mode!r}")
+    try:
+        precondition_bpw_floor = float(
+            precondition_section.get("bpw_floor", 4.0))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"[precondition] bpw_floor must be a number; got "
+            f"{precondition_section.get('bpw_floor')!r}")
+
     # libs: CLI --libs > [prismaquant-llama] libs > None.
     if libs is not None:
         libs_resolved = Path(libs).expanduser().resolve()
@@ -178,6 +204,8 @@ def load_config(config_path: Optional[Path] = None,
         libs=libs_resolved,
         reference_format=reference_format,
         mtp_format=mtp_format,
+        precondition_mode=precondition_mode,
+        precondition_bpw_floor=precondition_bpw_floor,
         config_path=config_path,
     )
 

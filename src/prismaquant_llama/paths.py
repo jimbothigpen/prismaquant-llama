@@ -108,6 +108,16 @@ class Layout:
                          priority: str) -> Path:
         return self.ggufs / f"{model_name}-PQ{budget_pct}-{priority}.gguf"
 
+    def preconditioned_bf16_path(self, model_name: str, ref_format: str) -> Path:
+        """Stage F+'s preconditioned BF16 GGUF (one per model, shared across
+        runs)."""
+        ref_upper = ref_format.upper()
+        return self.bf16_dir / f"{model_name}-{ref_upper}-pc.gguf"
+
+    def precondition_manifest_path(self) -> Path:
+        """Per-run F+ decision manifest."""
+        return self.work / "precondition.json"
+
     def system_calibration_path(self) -> Path:
         return self.calibration_dir / "system.json"
 
@@ -182,6 +192,8 @@ def wipe_model_artifacts(layout: "Layout", model_name: str, ref_format: str,
     _rm_tree(layout.hf_cache / model_name, "hf-cache")
     _rm_tree(layout.gguf_cache / model_name, "gguf-cache")
     _rm_file(bf16, "bf16")
+    pc_bf16 = layout.bf16_dir / f"{model_name}-{ref_upper}-pc.gguf"
+    _rm_file(pc_bf16, "bf16")
     if layout.probe_dir.exists():
         for p in layout.probe_dir.glob(f"{model_name}-*"):
             if p.is_dir():

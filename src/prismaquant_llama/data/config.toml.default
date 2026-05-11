@@ -283,3 +283,33 @@ convert_script = ""
 # Override per-run with `--libs /path/to/llama-libs`.
 # ──────────────────────────────────────────────────────────────────────────────
 libs = ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# [precondition] — Stage F+, between G (allocator) and H (quantize).
+#
+# F+ applies activation-aware pre-conditioning passes (AWQ channel rescale,
+# GPTQ rounding, scale-sweep, HALO rotation) to BF16 weights of tensors whose
+# allocator-chosen format is at or above `bpw_floor`. The literal "disable
+# below 4 bits" caveat falls out of the threshold: tensors that landed at
+# IQ3 / Q3 / Q2 / etc. pass through unchanged.
+#
+# CURRENT PHASE: P1 — skeleton only. `mode = "on"` walks the recipe, records
+# per-tensor decisions in `work/<run>/precondition.json`, and produces a
+# passthrough `<model>-BF16-pc.gguf` (hardlink of the source BF16). No weights
+# are modified yet. Real method primitives arrive in P2 (AWQ), P3 (+GPTQ),
+# P4 (+scale-sweep), P5 (+HALO).
+#
+# CLI overrides: `--precondition off|on`, `--precondition-bpw-floor 4.0`.
+# ──────────────────────────────────────────────────────────────────────────────
+[precondition]
+
+# mode — "off" (default) skips Stage F+ entirely; "on" enables the P1
+# skeleton (manifest + passthrough pc-GGUF; no weight changes yet). Future
+# phases will accept "awq", "awq+gptq", "awq+gptq+sweep", "halo".
+mode = "off"
+
+# bpw_floor — chosen-format bits-per-weight below which F+ skips the tensor.
+# Default 4.0 is the literal "disable below 4 bits" cutoff. Bump to 4.5 to
+# exclude IQ4_XS (~4.25 bpw); drop to 3.5 if you want Q3_K to benefit too.
+bpw_floor = 4.0

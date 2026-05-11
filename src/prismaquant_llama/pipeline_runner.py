@@ -4,15 +4,16 @@ End-to-end prismaquant pipeline.
 Stages (safetensors-input only — Stage C requires safetensors for the
 Hessian probe):
 
-    A. Download HF safetensors                  (HF id only)
-    B. Convert safetensors → BF16 GGUF          (HF id and on-disk safetensors)
-    C. Hessian probe via prismaquant.incremental_probe
-    D. imatrix generation (llama-imatrix)
-    E. per-(tensor, format) MSE costs (llama-quantize-cost)
-    F. Bridge HF→GGUF tensor names (bundled bridge_probe_to_gguf.py)
-    G. Allocate formats per tensor (bundled allocator.py)
-    H. Apply recipe (llama-quantize)
-    I. Final PPL eval (llama-perplexity)
+    A.  Download HF safetensors                 (HF id only)
+    B.  Convert safetensors → BF16 GGUF         (HF id and on-disk safetensors)
+    C.  Hessian probe via prismaquant.incremental_probe
+    D.  imatrix generation (llama-imatrix)
+    E.  per-(tensor, format) MSE costs (llama-quantize-cost)
+    F.  Bridge HF→GGUF tensor names (bundled bridge_probe_to_gguf.py)
+    G.  Allocate formats per tensor (bundled allocator.py)
+    F+. (optional) Pre-condition ≥4-bit BF16 tensors (see precondition.py)
+    H.  Apply recipe (llama-quantize)
+    I.  Final PPL eval (llama-perplexity)
 
 Each stage caches by file existence and is idempotent.
 """
@@ -1013,7 +1014,15 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
                                     bf16_path, perf_file, budget_gb,
                                     resolved.model_name,
                                     mtp_tensors_path=mtp_tensors_path)
-    final_gguf = stage_h_quantize(cfg, layout, bf16_path, recipe_path,
+
+    # F+: pre-condition BF16 weights of ≥4-bit recipe entries. Lazy import to
+    # avoid the precondition module's `from .pipeline_runner import _log`-
+    # style coupling concerns; the module is self-contained otherwise.
+    from .precondition import stage_fp_precondition
+    bf16_for_quantize, _pc_manifest = stage_fp_precondition(
+        cfg, layout, bf16_path, recipe_path, costs_path, resolved.model_name)
+
+    final_gguf = stage_h_quantize(cfg, layout, bf16_for_quantize, recipe_path,
                                    imatrix_path, resolved.model_name)
 
     # I
@@ -1115,6 +1124,18 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                         "the model calibration JSON) so the entire pipeline "
                         "is recomputed from scratch. Use after a llama.cpp "
                         "bugfix that invalidates prior outputs.")
+    p.add_argument("--precondition", choices=("off", "on"), default=None,
+                   help="Stage F+ pre-conditioning (P1: skeleton only — walks "
+                        "the recipe, writes a manifest, and produces a "
+                        "passthrough <model>-BF16-pc.gguf; no weight math). "
+                        "Default: from [precondition].mode in config "
+                        "(typically 'off'). Future phases add awq / "
+                        "awq+gptq / awq+gptq+sweep / halo modes.")
+    p.add_argument("--precondition-bpw-floor", type=float, default=None,
+                   help="Skip F+ for any tensor whose chosen-format bpw is "
+                        "below this threshold — the literal 'disable below 4 "
+                        "bits' cutoff. Default: from [precondition].bpw_floor "
+                        "in config (typically 4.0).")
 
 
 def cfg_from_args(args) -> Config:
@@ -1140,6 +1161,10 @@ def cfg_from_args(args) -> Config:
         cfg.imatrix_corpus = args.imatrix_corpus
     if getattr(args, "convert_script", None) is not None:
         cfg.convert_script = Path(args.convert_script).expanduser().resolve()
+    if getattr(args, "precondition", None) is not None:
+        cfg.precondition_mode = args.precondition
+    if getattr(args, "precondition_bpw_floor", None) is not None:
+        cfg.precondition_bpw_floor = args.precondition_bpw_floor
     return cfg
 
 
