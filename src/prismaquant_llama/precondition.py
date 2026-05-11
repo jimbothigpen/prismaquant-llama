@@ -25,6 +25,7 @@ import csv
 import json
 import mmap
 import os
+import pickle
 import re
 import shutil
 import time
@@ -170,6 +171,30 @@ def _gguf_reader_to_hf_name(gguf_name: str) -> Optional[str]:
 def _actcache_file(act_cache_dir: Path, hf_base_name: str) -> Path:
     """`model.layers.3.self_attn.q_proj` → `<dir>/model__layers__3__self_attn__q_proj.pt`."""
     return act_cache_dir / (hf_base_name.replace(".", "__") + ".pt")
+
+
+def _resolve_act_cache_dir(layout: Layout, model_name: str) -> Path:
+    """Read the canonical activation_cache_dir from the probe.pkl meta.
+
+    Stage C's probe.pkl is often symlinked across hosts (ai01's Vulkan base
+    points to the canonical ai00 rocm-base probe). Its `meta.activation_cache_dir`
+    records the absolute cephfs path where activations were saved — that's
+    the right source even when this host has a stale local `probe/act-cache/`
+    directory from an unrelated probe run.
+
+    Falls back to `layout.probe_dir/act-cache` only when probe.pkl is missing
+    or the meta field is absent.
+    """
+    probe_path = layout.probe_dir / f"{model_name}-probe.pkl"
+    try:
+        with probe_path.open("rb") as f:
+            probe = pickle.load(f)
+        cache_dir = (probe.get("meta", {}) or {}).get("activation_cache_dir")
+        if cache_dir:
+            return Path(cache_dir)
+    except Exception:
+        pass
+    return layout.probe_dir / "act-cache"
 
 
 def _load_acts(act_cache_dir: Path, hf_base_name: str
@@ -323,6 +348,13 @@ def _apply_fold(hdr: GgufHeader, mm, plan_entry: dict, act_cache_dir: Path
             f"fold {plan_entry['kind']}@blk.{plan_entry['layer']}: "
             f"all acts vanished between plan and apply")
     s = awq_joint_channel_scale(acts).cpu().numpy().astype(np.float32)
+    if s.shape[0] != plan_entry["in_features"]:
+        raise SystemExit(
+            f"fold {plan_entry['kind']}@blk.{plan_entry['layer']}: "
+            f"scale length {s.shape[0]} ≠ tensor in_features "
+            f"{plan_entry['in_features']}. The activation cache loaded for "
+            f"{plan_entry['hf_names']} disagrees with the GGUF's tensor "
+            f"shapes — likely a stale act-cache from a different probe run.")
     s_max = float(s.max())
     s_min = float(s.min())
     s_geomean = float(np.exp(np.mean(np.log(np.clip(s, 1e-30, None)))))
@@ -421,7 +453,8 @@ def stage_fp_precondition(
     # Parse the COPY's header (offsets are identical to the source, but
     # parsing the copy keeps us honest about which file we're mutating).
     hdr = parse_gguf_header(pc_path)
-    act_cache_dir = layout.probe_dir / "act-cache"
+    act_cache_dir = _resolve_act_cache_dir(layout, model_name)
+    _log(layout, f"F+. act-cache dir: {act_cache_dir}")
     if not act_cache_dir.exists():
         raise SystemExit(
             f"F+ needs activation cache at {act_cache_dir} (stage C output) "
