@@ -213,19 +213,24 @@ def _copy_for_inplace_mutation(src: Path, dst: Path,
                                  log_fn) -> tuple[str, float]:
     """Materialize a writable copy of `src` at `dst`. Returns (kind, seconds).
 
-    Never hardlink — we will mutate `dst` in place via mmap. A hardlink
-    would propagate mutations back into the source BF16, breaking the
+    Never hardlink — we will mutate `dst` in place via mmap, and a hardlink
+    would propagate mutations back into the source BF16, corrupting the
     SHA-keyed imatrix/costs caches built against it.
+
+    After copy, asserts `dst` and `src` have distinct inodes (paranoia: a
+    failed reflink that somehow returned 0 but linked instead would silently
+    poison the source on the next mmap write).
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         dst.unlink()
     t0 = time.time()
     try:
-        # cephfs supports reflinks via FICLONE; very fast COW copy.
+        # cephfs supports reflinks via FICLONE; very fast COW copy. Use
+        # absolute path to dodge non-interactive ssh PATH gaps on ai01.
         import subprocess
-        rc = subprocess.run(["cp", "--reflink=auto", str(src), str(dst)],
-                             check=False).returncode
+        rc = subprocess.run(["/usr/bin/cp", "--reflink=auto",
+                             str(src), str(dst)], check=False).returncode
         if rc != 0:
             raise OSError("reflink cp failed")
         kind = "reflink"
@@ -233,6 +238,10 @@ def _copy_for_inplace_mutation(src: Path, dst: Path,
         shutil.copy2(src, dst)
         kind = "copy"
     dt = time.time() - t0
+    if dst.stat().st_ino == src.stat().st_ino:
+        raise SystemExit(
+            f"FATAL: pc-bf16 at {dst} shares inode with source {src} after "
+            f"copy — would corrupt source on mmap write. Refusing to proceed.")
     log_fn(f"F+. materialized pc-bf16 via {kind} in {dt:.1f}s "
            f"({dst.stat().st_size/1024**3:.2f} GB)")
     return kind, dt
