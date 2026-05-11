@@ -1019,8 +1019,25 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
     # avoid the precondition module's `from .pipeline_runner import _log`-
     # style coupling concerns; the module is self-contained otherwise.
     from .precondition import stage_fp_precondition
-    bf16_for_quantize, _pc_manifest = stage_fp_precondition(
+    bf16_for_quantize, pc_manifest = stage_fp_precondition(
         cfg, layout, bf16_path, recipe_path, costs_path, resolved.model_name)
+
+    # D': if F+ actually mutated weights, re-run imatrix on pc-bf16 so the
+    # k-quants / IQ-quants in Stage H see fresh activation second-moments
+    # against the rescaled weights. stage_d_imatrix's SHA-keyed cache auto-
+    # keys off pc-bf16's content, so no special invalidation logic needed.
+    # Skipped when the user provided an explicit --imatrix (they've opted out
+    # of pipeline-managed imatrix); also skipped when no folds ran.
+    if (bf16_for_quantize != bf16_path
+            and pc_manifest is not None
+            and not imatrix_override):
+        summary = json.loads(Path(pc_manifest).read_text()).get("summary", {})
+        if summary.get("n_folds", 0) > 0:
+            _log(layout, "D'",
+                 f"D'. F+ applied {summary['n_folds']} fold(s); "
+                 f"re-running imatrix on pc-bf16")
+            imatrix_path = stage_d_imatrix(cfg, layout, bf16_for_quantize,
+                                             imatrix_corpus)
 
     final_gguf = stage_h_quantize(cfg, layout, bf16_for_quantize, recipe_path,
                                    imatrix_path, resolved.model_name)
