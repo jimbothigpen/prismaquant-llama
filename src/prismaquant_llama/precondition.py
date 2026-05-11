@@ -31,14 +31,24 @@ from .paths import Layout
 # Used when the costs.csv lacks a row for (tensor, chosen_fmt) — e.g.,
 # tensors assigned by shape-propagation from exemplar layers.
 _BPW_FALLBACK = {
+    # Reference dtypes
     "BF16": 16.0, "F16": 16.0, "F32": 32.0,
+    # Mainline k-quants
     "Q8_0": 8.5,
     "Q6_K": 6.5,
     "Q5_K_M": 5.7, "Q5_K_S": 5.5, "Q5_K": 5.5,
     "Q4_K_M": 4.8, "Q4_K_S": 4.5, "Q4_K": 4.5,
-    "IQ4_NL": 4.5, "IQ4_XS": 4.25,
     "Q3_K_L": 3.7, "Q3_K_M": 3.5, "Q3_K_S": 3.4, "Q3_K": 3.4,
+    # Mainline IQ family
+    "IQ4_NL": 4.5, "IQ4_XS": 4.25,
     "IQ3_M": 3.7, "IQ3_S": 3.5, "IQ3_XS": 3.3, "IQ3_XXS": 3.1,
+    # ik_llama IQ-K family (approx; precise bpw is shape-dependent)
+    "IQ4_K": 4.5, "IQ4_KS": 4.25, "IQ4_KSS": 4.0,
+    "IQ3_K": 3.4, "IQ3_KS": 3.0,
+    # ik_llama ternary-3-bit family
+    "TQ3_4S": 3.0625, "TQ3_1S": 3.0,
+    # MoE-only FP4 (mainline)
+    "MXFP4_MOE": 4.25,
 }
 
 
