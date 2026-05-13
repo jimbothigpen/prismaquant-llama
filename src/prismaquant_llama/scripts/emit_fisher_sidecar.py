@@ -153,12 +153,12 @@ def emit_sidecars(*,
     When `gguf_path` is given, validate each (HF -> GGUF) sidecar's
     `inputs.shape[1]` against the GGUF tensor's `ne[0]` (the inner / in-dim
     of the weight matrix). Sidecars whose dim doesn't match are silently
-    SKIPPED rather than written — this dodges a known upstream-prismaquant
-    probe issue where the act-cache `inputs` blob doesn't match the HF
-    Linear's true in_features for many tensors (only ~13% of Qwen3.5-4B
-    sidecars match). llama-quantize-cost would WARN+ignore mismatched
-    sidecars anyway, but suppressing them at emit time keeps the output
-    cleaner and makes the dim-mismatch count visible in pipeline logs."""
+    SKIPPED rather than written. On a fresh probe with current
+    prismaquant HEAD this should be ~0; it remains as defensive plumbing
+    against stale pre-merge act-cache. llama-quantize-cost would
+    WARN+ignore mismatched sidecars anyway, but suppressing them at emit
+    time keeps the output cleaner and makes the dim-mismatch count
+    visible in pipeline logs."""
     with probe_pkl.open("rb") as f:
         probe = pickle.load(f)
     meta = probe.get("meta", {}) or {}
@@ -218,6 +218,15 @@ def emit_sidecars(*,
         for gguf_name, _frac in targets:
             if gguf_meta:
                 meta = gguf_meta.get(gguf_name)
+                # Tied-LM-head fallback: when the GGUF lacks `output.weight`
+                # (tied embeddings), the LM head shares weights with
+                # `token_embd.weight`. Redirect the sidecar to that tensor
+                # if its inner dim matches.
+                if meta is None and gguf_name == "output.weight":
+                    tied = gguf_meta.get("token_embd.weight")
+                    if tied is not None and int(tied[0]) == sc_in_features:
+                        gguf_name = "token_embd.weight"
+                        meta = tied
                 if meta is None:
                     n_dim_mismatch += 1
                     continue
