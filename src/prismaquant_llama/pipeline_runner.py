@@ -264,7 +264,8 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
 
 
 def stage_e_pre_sidecar(cfg: Config, layout: Layout, probe_path: Path,
-                         safetensors_dir: Path) -> Optional[Path]:
+                         safetensors_dir: Path,
+                         bf16_path: Optional[Path] = None) -> Optional[Path]:
     """Stage E-pre — emit per-tensor Fisher sidecars for llama-quantize-cost.
 
     Runs only when cfg.fisher_output_mse is set. Reads probe.pkl + act-cache
@@ -298,6 +299,11 @@ def stage_e_pre_sidecar(cfg: Config, layout: Layout, probe_path: Path,
                           "fall back to uniform; column will reflect "
                           "unweighted per-row output MSE instead of true "
                           "Fisher weighting")
+    if bf16_path is not None:
+        # Validate sidecar in_features against GGUF ne[0]; suppress mismatched
+        # targets at emit time so llama-quantize-cost doesn't WARN-spam later
+        # and the dim-mismatch count is visible in stage-E-pre.log.
+        cmd += ["--gguf", str(bf16_path)]
     rc = _run(cmd, layout.logs_dir / "stage-E-pre.log",
               env=subprocess_env(cfg))
     if rc != 0:
@@ -471,7 +477,12 @@ def stage_g_allocate(cfg: Config, layout: Layout,
                      budget_gb: float, model_name: str,
                      mtp_tensors_path: Optional[Path] = None) -> Path:
     """Stage G — multi-choice knapsack allocation."""
-    recipe = layout.recipes_dir / f"recipe-PQ{cfg.budget}-{cfg.priority}.json"
+    # Fisher-on recipes get a `-fisher` filename suffix so fisher and weight-MSE
+    # runs cleanly partition the recipe cache (matches Stage E's costs-cache
+    # `fisher+` prefix scheme from S1; PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR
+    # is set below to make the bundled allocator switch scoring modes).
+    suffix = "-fisher" if cfg.fisher_output_mse else ""
+    recipe = layout.recipes_dir / f"recipe-PQ{cfg.budget}-{cfg.priority}{suffix}.json"
     if recipe.exists():
         _log(layout, "G", f"G. recipe cached (skip)")
         return recipe
@@ -505,7 +516,12 @@ def stage_g_allocate(cfg: Config, layout: Layout,
                 "--mtp-format", cfg.mtp_format]
         _log(layout, "G",
              f"G. mtp override: pin {mtp_tensors_path.name} → {cfg.mtp_format}")
-    rc = _run(cmd, layout.logs_dir / "stage-G.log", env=subprocess_env(cfg))
+    g_env = subprocess_env(cfg)
+    if cfg.fisher_output_mse:
+        # Mirror upstream prismaquant: env gate, not CLI flag. Keeps the bundled
+        # allocator's CLI surface unchanged and matches the upstream toggle name.
+        g_env["PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR"] = "1"
+    rc = _run(cmd, layout.logs_dir / "stage-G.log", env=g_env)
     if rc != 0 or not recipe.exists():
         raise SystemExit(f"FAIL: G allocator exit={rc}")
     return recipe
@@ -1159,7 +1175,8 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
 
     # E-pre: fisher sidecar emission (no-op unless cfg.fisher_output_mse).
     fisher_sidecar_dir = stage_e_pre_sidecar(cfg, layout, probe_path,
-                                              safetensors_dir)
+                                              safetensors_dir,
+                                              bf16_path=bf16_path)
 
     # E–H
     costs_path = stage_e_costs(cfg, layout, bf16_path, imatrix_path,

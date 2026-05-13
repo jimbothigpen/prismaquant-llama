@@ -144,9 +144,21 @@ def emit_sidecars(*,
                   n_hidden_layers: Optional[int],
                   n_nextn_layers: int = 0,
                   act_cache_dir: Optional[Path] = None,
-                  h_detail_dir: Optional[Path] = None) -> tuple[int, int, int]:
+                  h_detail_dir: Optional[Path] = None,
+                  gguf_path: Optional[Path] = None,
+                  ) -> tuple[int, int, int, int]:
     """Walk act-cache, emit one sidecar per (HF -> GGUF) mapping target.
-    Returns (n_written, n_unmapped, n_skipped)."""
+    Returns (n_written, n_unmapped, n_skipped, n_dim_mismatch).
+
+    When `gguf_path` is given, validate each (HF -> GGUF) sidecar's
+    `inputs.shape[1]` against the GGUF tensor's `ne[0]` (the inner / in-dim
+    of the weight matrix). Sidecars whose dim doesn't match are silently
+    SKIPPED rather than written — this dodges a known upstream-prismaquant
+    probe issue where the act-cache `inputs` blob doesn't match the HF
+    Linear's true in_features for many tensors (only ~13% of Qwen3.5-4B
+    sidecars match). llama-quantize-cost would WARN+ignore mismatched
+    sidecars anyway, but suppressing them at emit time keeps the output
+    cleaner and makes the dim-mismatch count visible in pipeline logs."""
     with probe_pkl.open("rb") as f:
         probe = pickle.load(f)
     meta = probe.get("meta", {}) or {}
@@ -162,9 +174,21 @@ def emit_sidecars(*,
               file=sys.stderr)
         return (0, 0, 0)
 
+    # Optional GGUF dim-validation. We import allocator.read_gguf_tensor_meta
+    # rather than duplicating the header parser; both files live in scripts/
+    # and scripts/'s dir is already on sys.path via the bridge_probe_to_gguf
+    # import above.
+    gguf_meta: dict[str, tuple] = {}
+    if gguf_path is not None:
+        from allocator import read_gguf_tensor_meta  # noqa: E402
+        gguf_meta = read_gguf_tensor_meta(str(gguf_path))
+        print(f"[fisher-sidecar] gguf dim-validation: {len(gguf_meta)} tensors "
+              f"loaded from {gguf_path}")
+
     n_written = 0
     n_unmapped = 0
     n_skipped = 0
+    n_dim_mismatch = 0
     for pt_path in sorted(act_cache_dir.glob("*.pt")):
         hf_name = _hf_from_actcache_filename(pt_path.name)
         try:
@@ -190,11 +214,20 @@ def emit_sidecars(*,
         if not targets:
             n_unmapped += 1
             continue
+        sc_in_features = int(X.shape[1])
         for gguf_name, _frac in targets:
+            if gguf_meta:
+                meta = gguf_meta.get(gguf_name)
+                if meta is None:
+                    n_dim_mismatch += 1
+                    continue
+                if int(meta[0]) != sc_in_features:
+                    n_dim_mismatch += 1
+                    continue
             out_path = out_dir / f"{_safe_gguf_name(gguf_name)}.bin"
             _write_sidecar(out_path, X, fw)
             n_written += 1
-    return n_written, n_unmapped, n_skipped
+    return n_written, n_unmapped, n_skipped, n_dim_mismatch
 
 
 def main():
@@ -212,17 +245,23 @@ def main():
     ap.add_argument("--h-detail-dir", default=None,
                     help="path to h-detail dir produced by --h-detail-dir on "
                          "the probe; if absent, fisher_weights default to 1.0")
+    ap.add_argument("--gguf", default=None,
+                    help="optional path to the BF16 GGUF; enables per-target "
+                         "dim validation (sidecar in_features must equal "
+                         "GGUF ne[0]). Mismatched targets are silently skipped.")
     args = ap.parse_args()
-    n_w, n_u, n_s = emit_sidecars(
+    n_w, n_u, n_s, n_dm = emit_sidecars(
         probe_pkl=Path(args.probe),
         out_dir=Path(args.output_dir),
         n_hidden_layers=args.n_hidden_layers,
         n_nextn_layers=args.n_nextn_layers,
         act_cache_dir=Path(args.act_cache_dir) if args.act_cache_dir else None,
         h_detail_dir=Path(args.h_detail_dir) if args.h_detail_dir else None,
+        gguf_path=Path(args.gguf) if args.gguf else None,
     )
     print(f"[fisher-sidecar] wrote {n_w} sidecars "
-          f"({n_u} unmapped HF entries, {n_s} skipped)")
+          f"({n_u} unmapped HF entries, {n_s} skipped, "
+          f"{n_dm} skipped-on-gguf-dim-mismatch)")
 
 
 if __name__ == "__main__":

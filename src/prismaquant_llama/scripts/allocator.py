@@ -24,6 +24,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import struct
 import sys
@@ -31,14 +32,42 @@ from collections import defaultdict
 from pathlib import Path
 
 
+def _fisher_output_mse_allocator_enabled() -> bool:
+    """Mirror prismaquant/allocator_candidates.py::_fisher_output_mse_allocator_enabled.
+
+    When set to a truthy value, the allocator scores (tensor, format) pairs by
+    the `fisher_output_mse` column (per-row Fisher-weighted output MSE) instead
+    of the default `mse` column (weight MSE). Falls back to weight MSE on any
+    (tensor, format) where fisher_output_mse is non-finite (nan).
+    """
+    value = os.environ.get("PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR")
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _score_mse(entry: tuple, use_fisher: bool) -> float:
+    """Return the MSE value to use for the PPL surrogate term.
+
+    entry = (mse, size_bytes, n_elements, bpw, fisher_output_mse).
+    """
+    mse, _, _, _, fisher_mse = entry
+    if use_fisher and math.isfinite(fisher_mse):
+        return fisher_mse
+    return mse
+
+
 def load_costs(path: str) -> dict:
-    """Returns {tensor_name: {format: (mse, size_bytes, n_elements, bpw)}}.
+    """Returns {tensor_name: {format: (mse, size_bytes, n_elements, bpw, fisher_output_mse)}}.
 
     Normalizes the `fmt` column to uppercase so format keys match cfg.quants,
     --allow-types, --mtp-format, etc. (all uppercase by convention).
     llama-quantize-cost emits ggml's canonical type name (e.g. `q3_K`,
     `bf16`, `iq4_kss`), which is case-mixed and would otherwise miss the
     case-sensitive allow filter.
+
+    `fisher_output_mse` is float('nan') when the CSV lacks the column (older
+    pipelines) or when the row has no matching sidecar.
     """
     by_tensor = defaultdict(dict)
     with open(path) as f:
@@ -51,7 +80,15 @@ def load_costs(path: str) -> dict:
             sz  = int(r["size_bytes"])
             n   = int(r["n_elements"])
             bpw = float(r["bpw"])
-            by_tensor[r["tensor_name"]][r["fmt"].upper()] = (mse, sz, n, bpw)
+            fisher_str = r.get("fisher_output_mse", "nan")
+            if fisher_str == "" or fisher_str.lower() == "nan":
+                fisher = float("nan")
+            else:
+                try:
+                    fisher = float(fisher_str)
+                except ValueError:
+                    fisher = float("nan")
+            by_tensor[r["tensor_name"]][r["fmt"].upper()] = (mse, sz, n, bpw, fisher)
     return dict(by_tensor)
 
 
@@ -297,7 +334,8 @@ def _tps_lookup(tps: dict, fmt: str, axis: str) -> float:
     return 1.0
 
 
-def compute_norms(costs: dict, fisher: dict, tps: dict) -> tuple[float, float, float]:
+def compute_norms(costs: dict, fisher: dict, tps: dict,
+                  use_fisher: bool = False) -> tuple[float, float, float]:
     """Population means of each cost component over all (t, f) pairs. Used to
     bring the three terms into comparable units before applying weights."""
     n = 0
@@ -306,8 +344,9 @@ def compute_norms(costs: dict, fisher: dict, tps: dict) -> tuple[float, float, f
     sum_pp  = 0.0
     for t, fmts in costs.items():
         h = fisher.get(t, 0.0)
-        for f, (mse, sz, _, _) in fmts.items():
-            sum_ppl += 0.5 * h * mse
+        for f, entry in fmts.items():
+            _, sz, _, _, _ = entry
+            sum_ppl += 0.5 * h * _score_mse(entry, use_fisher)
             tg = _tps_lookup(tps, f, "tg")
             pp = _tps_lookup(tps, f, "pp")
             sum_tg += sz / tg
@@ -328,6 +367,7 @@ def solve_for_lambda(fisher: dict[str, float],
                      weights: tuple[float, float, float] = (1.0, 0.0, 0.0),
                      tps: dict | None = None,
                      norms: tuple[float, float, float] = (1.0, 1.0, 1.0),
+                     use_fisher: bool = False,
                      ) -> tuple[dict[str, str], int, float]:
     """Per-tensor argmin( w_PPL · ĉ_ppl + w_TG · ĉ_tg + w_PP · ĉ_pp + λ · size ),
     where ĉ_x are normalized cost components (per-tensor PPL surrogate, TG
@@ -348,15 +388,17 @@ def solve_for_lambda(fisher: dict[str, float],
             if f not in fmts:
                 # Fall back to nearest available higher-bit format if pinned is missing
                 f = max(fmts.keys(), key=lambda k: fmts[k][3])
-            mse, sz, _, _ = fmts[f]
+            entry = fmts[f]
+            _, sz, _, _, _ = entry
             recipe[t] = f
             total_size += sz
-            total_loss += 0.5 * fisher.get(t, 0.0) * mse
+            total_loss += 0.5 * fisher.get(t, 0.0) * _score_mse(entry, use_fisher)
             continue
         h = fisher.get(t, 0.0)
         best_f, best_score = None, math.inf
-        for f, (mse, sz, _, _) in fmts.items():
-            ppl_term = 0.5 * h * mse / n_ppl
+        for f, entry in fmts.items():
+            _, sz, _, _, _ = entry
+            ppl_term = 0.5 * h * _score_mse(entry, use_fisher) / n_ppl
             tg_tps = _tps_lookup(tps, f, "tg")
             pp_tps = _tps_lookup(tps, f, "pp")
             tg_term = (sz / tg_tps) / n_tg
@@ -369,9 +411,10 @@ def solve_for_lambda(fisher: dict[str, float],
         if best_f is None:
             continue
         recipe[t] = best_f
-        mse, sz, _, _ = fmts[best_f]
+        entry = fmts[best_f]
+        _, sz, _, _, _ = entry
         total_size += sz
-        total_loss += 0.5 * h * mse
+        total_loss += 0.5 * h * _score_mse(entry, use_fisher)
     return recipe, total_size, total_loss
 
 
@@ -383,6 +426,7 @@ def _quality_tiebreak(recipe: dict[str, str],
                       tps: dict,
                       norms: tuple[float, float, float],
                       size_tol: float = 0.01,
+                      use_fisher: bool = False,
                       ) -> dict[str, str]:
     """Among formats with size within `size_tol` (fractional) of the per-tensor
     minimum-size format, re-pick by lowest weighted (PPL+TG+PP) cost.
@@ -405,7 +449,7 @@ def _quality_tiebreak(recipe: dict[str, str],
         if not fmts:
             continue
         # Per-tensor minimum size across post-floor candidates
-        min_sz = min(sz for (_, sz, _, _) in fmts.values())
+        min_sz = min(e[1] for e in fmts.values())
         threshold = min_sz * (1.0 + size_tol)
         candidates = [(f, fmts[f]) for f in fmts if fmts[f][1] <= threshold]
         if len(candidates) <= 1:
@@ -413,8 +457,9 @@ def _quality_tiebreak(recipe: dict[str, str],
         h = fisher.get(t, 0.0)
         best_f = recipe[t]
         best_cost = math.inf
-        for f, (mse, sz, _, _) in candidates:
-            ppl_term = 0.5 * h * mse / n_ppl
+        for f, entry in candidates:
+            _, sz, _, _, _ = entry
+            ppl_term = 0.5 * h * _score_mse(entry, use_fisher) / n_ppl
             tg_tps = _tps_lookup(tps, f, "tg")
             pp_tps = _tps_lookup(tps, f, "pp")
             tg_term = (sz / tg_tps) / n_tg
@@ -428,16 +473,18 @@ def _quality_tiebreak(recipe: dict[str, str],
 
 
 def _recompute_size_loss(recipe: dict[str, str], costs: dict,
-                         fisher: dict[str, float]) -> tuple[int, float]:
+                         fisher: dict[str, float],
+                         use_fisher: bool = False) -> tuple[int, float]:
     """Sum size + 0.5·h_trace·mse over a recipe (skipping tensors not in costs)."""
     total_size = 0
     total_loss = 0.0
     for t, f in recipe.items():
         if t not in costs or f not in costs[t]:
             continue
-        mse, sz, _, _ = costs[t][f]
+        entry = costs[t][f]
+        _, sz, _, _, _ = entry
         total_size += sz
-        total_loss += 0.5 * fisher.get(t, 0.0) * mse
+        total_loss += 0.5 * fisher.get(t, 0.0) * _score_mse(entry, use_fisher)
     return total_size, total_loss
 
 
@@ -448,6 +495,7 @@ def bisect_lambda(fisher: dict, costs: dict, pinned: dict, budget_bytes: int,
                   tol_bytes: int = 10_000_000,
                   band_bytes: int = 0,
                   saturation_size_tol: float = 0.01,
+                  use_fisher: bool = False,
                   ) -> tuple[float, dict, int, float]:
     """Find λ such that the recipe size is within tol_bytes of the budget.
 
@@ -461,7 +509,7 @@ def bisect_lambda(fisher: dict, costs: dict, pinned: dict, budget_bytes: int,
     cost prefers larger formats. For TG/PP-weighted priorities, the multi-
     objective cost can naturally land below budget, requiring λ < 0 to spend
     the remaining budget on quality."""
-    kw = dict(weights=weights, tps=tps, norms=norms)
+    kw = dict(weights=weights, tps=tps, norms=norms, use_fisher=use_fisher)
 
     # First, check the natural optimum (λ=0) — does it land at, above, or below budget?
     recipe0, size0, loss0 = solve_for_lambda(fisher, costs, pinned, 0.0, **kw)
@@ -487,8 +535,10 @@ def bisect_lambda(fisher: dict, costs: dict, pinned: dict, budget_bytes: int,
                   flush=True)
             recipe_hi = _quality_tiebreak(recipe_hi, costs, fisher, pinned,
                                           weights, tps or {}, norms,
-                                          size_tol=saturation_size_tol)
-            size_hi, loss_hi = _recompute_size_loss(recipe_hi, costs, fisher)
+                                          size_tol=saturation_size_tol,
+                                          use_fisher=use_fisher)
+            size_hi, loss_hi = _recompute_size_loss(recipe_hi, costs, fisher,
+                                                    use_fisher=use_fisher)
             return hi, recipe_hi, size_hi, loss_hi
     else:
         # Natural opt under-shoots budget — search negative λ (size reward).
@@ -730,7 +780,26 @@ def main():
     elif weights[1] > 0 or weights[2] > 0:
         print(f"[allocator] WARN: priority requests TG/PP weight but no --tps file; "
               f"speed terms will use tps=1.0 (no-op)", flush=True)
-    norms = compute_norms(costs, fisher, tps)
+    use_fisher = _fisher_output_mse_allocator_enabled()
+    if use_fisher:
+        # Count finite fisher_output_mse values so the user can spot a
+        # silently-broken sidecar emission (env gate on but every entry nan).
+        n_finite_fisher = sum(1 for fmts in costs.values()
+                              for e in fmts.values()
+                              if math.isfinite(e[4]))
+        n_total_entries = sum(len(fmts) for fmts in costs.values())
+        print(f"[allocator] scoring: fisher "
+              f"(PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR set; "
+              f"{n_finite_fisher}/{n_total_entries} entries have finite "
+              f"fisher_output_mse; rest fall back to weight MSE)",
+              flush=True)
+    else:
+        print(f"[allocator] scoring: weight "
+              f"(weight-MSE Δloss surrogate; set "
+              f"PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR=1 to switch)",
+              flush=True)
+
+    norms = compute_norms(costs, fisher, tps, use_fisher=use_fisher)
     print(f"[allocator] cost norms (per-tensor mean): "
           f"PPL={norms[0]:.3e}  TG={norms[1]:.3e}  PP={norms[2]:.3e}", flush=True)
 
@@ -739,7 +808,7 @@ def main():
     lam, recipe, total_size, total_loss = bisect_lambda(
         fisher, costs, pinned, budget_bytes,
         weights=weights, tps=tps, norms=norms,
-        band_bytes=band_bytes)
+        band_bytes=band_bytes, use_fisher=use_fisher)
     delta_gb = (total_size - budget_bytes) / (1024 ** 3)
     in_band = abs(delta_gb) <= args.budget_band_gb
     band_marker = "✓ in-band" if in_band else "⚠ out-of-band"
@@ -763,7 +832,8 @@ def main():
             missing = [n for n in mtp_names
                        if n in recipe and (n not in costs
                                             or recipe[n] not in costs[n])]
-            total_size, total_loss = _recompute_size_loss(recipe, costs, fisher)
+            total_size, total_loss = _recompute_size_loss(recipe, costs, fisher,
+                                                          use_fisher=use_fisher)
             delta_gb = (total_size - args.budget_gb * (1024 ** 3)) / (1024 ** 3)
             print(f"[allocator] mtp override: pinned {n_overridden} tensors to "
                   f"{args.mtp_format}; post-override size="
@@ -801,6 +871,7 @@ def main():
             "priority": args.priority,
             "weights": {"ppl": weights[0], "tg": weights[1], "pp": weights[2]},
             "format_counts": dict(fmt_counts),
+            "scoring": "fisher" if use_fisher else "weight",
         }, f, indent=2)
     print(f"[allocator] wrote recipe to {args.recipe_out}", flush=True)
 
@@ -827,7 +898,8 @@ def main():
                 bytes_b = int(b * (1024**3))
                 ll, rr, ss, lo = bisect_lambda(
                     fisher, costs, pinned, bytes_b,
-                    weights=weights, tps=tps, norms=norms)
+                    weights=weights, tps=tps, norms=norms,
+                    use_fisher=use_fisher)
                 fc = defaultdict(int)
                 for ff in rr.values(): fc[ff] += 1
                 w.writerow([b, ll, ss/(1024**3), lo, *[fc[k] for k in fmt_keys]])
