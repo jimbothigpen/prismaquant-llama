@@ -527,6 +527,26 @@ def stage_g_allocate(cfg: Config, layout: Layout,
     return recipe
 
 
+def _mark_pareto(results: list[dict]) -> None:
+    """In-place: set ``is_pareto`` on each Stage-K candidate.
+
+    Non-dominated in (size_gb, ppl): no other candidate has both
+    ``size_gb <= self.size_gb`` and ``ppl <= self.ppl`` with strict
+    inequality on at least one axis. Ties (identical size+ppl) all
+    stay on the frontier.
+    """
+    for i, r in enumerate(results):
+        dominated = False
+        for j, q in enumerate(results):
+            if i == j:
+                continue
+            if (q["size_gb"] <= r["size_gb"] and q["ppl"] <= r["ppl"]
+                    and (q["size_gb"] < r["size_gb"] or q["ppl"] < r["ppl"])):
+                dominated = True
+                break
+        r["is_pareto"] = not dominated
+
+
 def stage_k_validate(cfg: Config, layout: Layout,
                      bridge_path: Path, costs_path: Path,
                      bf16_path: Path, imatrix_path: Path,
@@ -662,10 +682,15 @@ def stage_k_validate(cfg: Config, layout: Layout,
         raise SystemExit("FAIL: K no candidates produced a Final estimate; "
                          "cannot pick a frontier winner")
 
+    _mark_pareto(results)
     winner = min(results, key=lambda r: r["ppl"])
     _log(layout, "K",
          f"K. winner: priority={winner['priority']}  "
          f"PPL={winner['ppl']:.4f}  size={winner['size_gb']:.2f} GB")
+    frontier = [r["priority"] for r in results if r["is_pareto"]]
+    _log(layout, "K",
+         f"K. pareto frontier ({len(frontier)}/{len(results)}): "
+         f"{', '.join(frontier)}")
 
     # Write validated-frontier recipe at a stable name so Stage H picks it up.
     validated = (layout.recipes_dir

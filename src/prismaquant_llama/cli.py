@@ -1,7 +1,7 @@
 """
 prismaquant-llama — unified CLI.
 
-Three subcommands:
+Four subcommands:
 
     prismaquant-llama calibrate {system|model} INPUT [flags]
         Measure per-format size/PPL/throughput for either the system default
@@ -19,6 +19,10 @@ Three subcommands:
         Useful for picking a (budget, priority) before committing to a
         full `run`.
 
+    prismaquant-llama show-frontier INPUT [--budget B] [--run LABEL]
+        Render the Stage-K size/PPL frontier for a prior run (latest by
+        default). Marks Pareto-frontier candidates and the chosen winner.
+
 Defaults come from ~/.prismaquant-llama/config.toml — auto-installed from
 the shipped default on first run. Edit by hand. CLI flags always win.
 """
@@ -34,9 +38,10 @@ def _print_help() -> None:
     print(__doc__.strip())
     print()
     print("Subcommands:")
-    print("  calibrate   measure per-format perf data (writes calibration/)")
-    print("  run         run the full prismaquant pipeline (writes ggufs/)")
-    print("  explore     sweep (budget × priority) without producing a GGUF")
+    print("  calibrate      measure per-format perf data (writes calibration/)")
+    print("  run            run the full prismaquant pipeline (writes ggufs/)")
+    print("  explore        sweep (budget × priority) without producing a GGUF")
+    print("  show-frontier  render a prior run's Stage-K size/PPL frontier")
     print()
     print("Run `prismaquant-llama <subcommand> --help` for per-subcommand options.")
 
@@ -72,6 +77,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if cmd == "explore":
         from . import explore
         return explore.main(argv[1:])
+    if cmd == "show-frontier":
+        from . import show_frontier
+        return show_frontier.main(argv[1:])
 
     print(f"prismaquant-llama: unknown subcommand: {cmd}", file=sys.stderr)
     print("Try `prismaquant-llama --help`.", file=sys.stderr)
