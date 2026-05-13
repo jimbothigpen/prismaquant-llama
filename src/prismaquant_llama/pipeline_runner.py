@@ -527,6 +527,168 @@ def stage_g_allocate(cfg: Config, layout: Layout,
     return recipe
 
 
+def stage_k_validate(cfg: Config, layout: Layout,
+                     bridge_path: Path, costs_path: Path,
+                     bf16_path: Path, imatrix_path: Path,
+                     perf_file: Optional[Path],
+                     budget_gb: float, ppl_corpus: Path,
+                     baseline_recipe: Path,
+                     model_name: str,
+                     mtp_tensors_path: Optional[Path] = None) -> Path:
+    """Stage K — KL/PPL-validated frontier picker.
+
+    Sweeps the allocator over `cfg.kl_priorities` at `budget_gb`, quantizes
+    each candidate, runs a short PPL pass (cfg.kl_ppl_chunks), then returns
+    the lowest-PPL recipe. `baseline_recipe` is the Stage-G output for the
+    user-requested priority; it gets included in the sweep so the user can
+    always opt out by setting cfg.priority in kl_priorities.
+
+    Designed as a real-quantize validator because upstream prismaquant's
+    `validate_assignments_kl` only knows serving formats (NVFP4/MXFP8/etc.)
+    and can't simulate K-quants; ground-truth quantize+PPL is the only
+    correct measure for our pipeline.
+    """
+    suffix = "-fisher" if cfg.fisher_output_mse else ""
+    work = layout.work / "stage-k"
+    work.mkdir(parents=True, exist_ok=True)
+    summary_path = work / f"summary-PQ{cfg.budget}{suffix}.json"
+
+    # Build the sweep set: baseline priority + each priority in cfg.kl_priorities.
+    # De-dup by priority string (preserve user order, baseline first).
+    sweep_priorities: list[str] = []
+    seen: set[str] = set()
+    for p in [cfg.priority] + list(cfg.kl_priorities):
+        if p not in seen:
+            sweep_priorities.append(p)
+            seen.add(p)
+
+    perp_bin = find_tool(cfg, "llama-perplexity")
+    quantize_bin = find_tool(cfg, "llama-quantize")
+    results: list[dict] = []
+
+    for p in sweep_priorities:
+        recipe_path = (layout.recipes_dir
+                       / f"recipe-PQ{cfg.budget}-{p}{suffix}.json")
+        if p == cfg.priority and baseline_recipe.exists():
+            recipe_path = baseline_recipe
+        elif not recipe_path.exists():
+            _log(layout, "K", f"K. allocator @ priority={p}")
+            allocator = _bundled_script("allocator.py")
+            pinned = layout.work / "pinned.json"
+            if not pinned.exists():
+                pinned.write_text(json.dumps({
+                    "output.weight": "Q6_K",
+                    "token_embd.weight": "Q8_0",
+                }, indent=2))
+            cmd = [sys.executable, str(allocator),
+                   "--bridge", str(bridge_path),
+                   "--costs", str(costs_path),
+                   "--budget-gb", str(budget_gb),
+                   "--budget-band-gb", "0.25",
+                   "--pinned", str(pinned),
+                   "--priority", p,
+                   "--recipe-out", str(recipe_path),
+                   "--allow-types", ",".join(cfg.quants),
+                   "--gguf", str(bf16_path),
+                   "--propagate-from-exemplars",
+                   "--exemplar-layers", "0,3",
+                   "--floor-bpw", json.dumps(
+                       {r"^blk\..*\.attn_(q|k|v|qkv|gate|output)\.weight$":
+                        4.0})]
+            if perf_file is not None and perf_file.exists():
+                cmd += ["--tps", str(perf_file)]
+            if mtp_tensors_path is not None and cfg.mtp_format:
+                cmd += ["--mtp-tensors", str(mtp_tensors_path),
+                        "--mtp-format", cfg.mtp_format]
+            g_env = subprocess_env(cfg)
+            if cfg.fisher_output_mse:
+                g_env["PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR"] = "1"
+            rc = _run(cmd, layout.logs_dir / f"stage-K-alloc-{p}.log",
+                      env=g_env)
+            if rc != 0 or not recipe_path.exists():
+                raise SystemExit(f"FAIL: K allocator @ priority={p} exit={rc}")
+
+        recipe_txt = _h_materialize_recipe_txt(recipe_path)
+        cand_gguf = work / f"candidate-PQ{cfg.budget}-{p}{suffix}.gguf"
+
+        if not cand_gguf.exists():
+            _log(layout, "K", f"K. quantize candidate @ priority={p}")
+            rc = _run([str(quantize_bin),
+                       "--imatrix", str(imatrix_path),
+                       "--tensor-type-file", str(recipe_txt),
+                       str(bf16_path), str(cand_gguf), "Q4_K"],
+                      layout.logs_dir / f"stage-K-quant-{p}.log",
+                      env=subprocess_env(cfg))
+            if rc != 0 or not cand_gguf.exists():
+                raise SystemExit(f"FAIL: K quantize @ priority={p} exit={rc}")
+
+        ppl_log = layout.logs_dir / f"stage-K-ppl-{p}.log"
+        if ppl_log.exists():
+            _log(layout, "K", f"K. ppl cached @ priority={p}")
+        else:
+            _log(layout, "K",
+                 f"K. perplexity @ priority={p} chunks={cfg.kl_ppl_chunks}")
+            rc = _run([str(perp_bin), "-m", str(cand_gguf), "-f",
+                       str(ppl_corpus),
+                       "-c", "4096", "-b", "2048",
+                       "-ctk", "f16", "-ctv", "f16", "-fa", "on",
+                       "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks),
+                       "--no-mmap"],
+                      ppl_log, env=subprocess_env(cfg))
+            if rc != 0:
+                _log(layout, "K",
+                     f"K. WARN: perplexity rc={rc} for priority={p}")
+        import re as _re
+        m = _re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)",
+                       ppl_log.read_text())
+        if not m:
+            _log(layout, "K",
+                 f"K. WARN: no Final estimate in {ppl_log.name}; "
+                 f"excluding priority={p}")
+            continue
+        ppl = float(m.group(1))
+        size_gb = cand_gguf.stat().st_size / 1024**3
+        _log(layout, "K",
+             f"K. priority={p}  PPL={ppl:.4f}  size={size_gb:.2f} GB")
+        results.append({
+            "priority": p,
+            "recipe": str(recipe_path),
+            "candidate_gguf": str(cand_gguf),
+            "ppl": ppl,
+            "size_gb": size_gb,
+        })
+
+    if not results:
+        raise SystemExit("FAIL: K no candidates produced a Final estimate; "
+                         "cannot pick a frontier winner")
+
+    winner = min(results, key=lambda r: r["ppl"])
+    _log(layout, "K",
+         f"K. winner: priority={winner['priority']}  "
+         f"PPL={winner['ppl']:.4f}  size={winner['size_gb']:.2f} GB")
+
+    # Write validated-frontier recipe at a stable name so Stage H picks it up.
+    validated = (layout.recipes_dir
+                 / f"recipe-PQ{cfg.budget}-{cfg.priority}{suffix}"
+                 f"-validated.json")
+    src = Path(winner["recipe"])
+    validated.write_text(src.read_text())
+    src_txt = src.with_suffix(".txt")
+    if src_txt.exists():
+        validated.with_suffix(".txt").write_text(src_txt.read_text())
+
+    summary_path.write_text(json.dumps({
+        "budget_gb": budget_gb,
+        "user_priority": cfg.priority,
+        "winner_priority": winner["priority"],
+        "winner_ppl": winner["ppl"],
+        "winner_size_gb": winner["size_gb"],
+        "candidates": results,
+    }, indent=2))
+    _log(layout, "K", f"K. summary written → {summary_path}")
+    return validated
+
+
 _H_CACHEKEY_VERSION = 1
 
 
@@ -1189,6 +1351,16 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
                                     bf16_path, perf_file, budget_gb,
                                     resolved.model_name,
                                     mtp_tensors_path=mtp_tensors_path)
+
+    # K: optional KL/PPL-validated frontier picker. Sweeps allocator priorities,
+    # quantizes each candidate, runs short PPL, picks lowest-loss recipe.
+    if cfg.kl_validate:
+        recipe_path = stage_k_validate(
+            cfg, layout, bridge_path, costs_path,
+            bf16_path, imatrix_path, perf_file,
+            budget_gb, ppl_corpus, recipe_path,
+            resolved.model_name,
+            mtp_tensors_path=mtp_tensors_path)
 
     # F+: pre-condition BF16 weights of ≥4-bit recipe entries. Lazy import to
     # avoid the precondition module's `from .pipeline_runner import _log`-

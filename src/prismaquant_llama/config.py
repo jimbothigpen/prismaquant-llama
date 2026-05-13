@@ -88,6 +88,17 @@ class Config:
     # PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR=1 is set (mirrors upstream).
     fisher_output_mse: bool = False
 
+    # Stage K — KL/PPL-validated frontier picker. When True, an extra stage
+    # runs between G and H that sweeps the allocator over kl_priorities at
+    # the user's budget, quantizes each candidate, runs a short PPL pass,
+    # and substitutes the lowest-loss recipe before Stage H. Default False
+    # so existing pipelines are unaffected.
+    kl_validate: bool = False
+    kl_priorities: list[str] = field(default_factory=lambda: ["100", "300",
+                                                              "500", "700",
+                                                              "900"])
+    kl_ppl_chunks: int = 20  # short chunks for sweep validation (S3 default)
+
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -179,6 +190,26 @@ def load_config(config_path: Optional[Path] = None,
 
     fisher_output_mse = bool(section.get("fisher_output_mse", False))
 
+    # Stage K (KL/PPL validated frontier picker). Off by default so existing
+    # pipelines are unaffected. When enabled, kl_priorities sweeps the
+    # allocator at the user's budget and kl_ppl_chunks bounds per-candidate
+    # perplexity cost.
+    kl_validate = bool(section.get("kl_validate", False))
+    raw_kl_priorities = section.get("kl_priorities") or ["100", "300", "500",
+                                                         "700", "900"]
+    if not isinstance(raw_kl_priorities, list) or not all(
+            isinstance(p, (str, int)) for p in raw_kl_priorities):
+        raise ValueError(
+            f"config 'kl_priorities' must be a list of priority strings; "
+            f"got {raw_kl_priorities!r}")
+    kl_priorities = [str(p) for p in raw_kl_priorities]
+    for p in kl_priorities:
+        _validate_priority(p)
+    kl_ppl_chunks = int(section.get("kl_ppl_chunks", 20))
+    if kl_ppl_chunks < 1:
+        raise ValueError(
+            f"config 'kl_ppl_chunks' must be ≥ 1; got {kl_ppl_chunks}")
+
     # Stage F+ lives in its own top-level [precondition] table for room to
     # grow as P2-P5 add method-specific knobs (awq strategy, gptq damping,
     # halo seed, etc.). Missing table → defaults (mode=off, bpw_floor=4.0).
@@ -227,6 +258,9 @@ def load_config(config_path: Optional[Path] = None,
         precondition_mode=precondition_mode,
         precondition_bpw_floor=precondition_bpw_floor,
         fisher_output_mse=fisher_output_mse,
+        kl_validate=kl_validate,
+        kl_priorities=kl_priorities,
+        kl_ppl_chunks=kl_ppl_chunks,
         config_path=config_path,
     )
 
