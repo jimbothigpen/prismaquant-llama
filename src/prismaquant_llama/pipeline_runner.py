@@ -210,15 +210,24 @@ def stage_c_probe(cfg: Config, layout: Layout, safetensors_dir: Path,
         _log(layout, "C", f"C. probe cached at {probe_path} (skip)")
         return probe_path
     _log(layout, "C", f"C. running prismaquant.incremental_probe on {safetensors_dir}")
-    rc = _run([sys.executable, "-m", "prismaquant.incremental_probe",
-               "--model", str(safetensors_dir),
-               "--dataset", str(imatrix_corpus),
-               "--nsamples", "16", "--seqlen", "512",
-               "--device", "cpu", "--dtype", "bf16",
-               "--output", str(probe_path),
-               "--activation-cache-dir", str(layout.probe_dir / "act-cache"),
-               "--work-dir", str(layout.probe_dir / "work")],
-              layout.logs_dir / "stage-C.log",
+    probe_cmd = [sys.executable, "-m", "prismaquant.incremental_probe",
+                 "--model", str(safetensors_dir),
+                 "--dataset", str(imatrix_corpus),
+                 "--nsamples", "16", "--seqlen", "512",
+                 "--device", "cpu", "--dtype", "bf16",
+                 "--output", str(probe_path),
+                 "--activation-cache-dir", str(layout.probe_dir / "act-cache"),
+                 "--work-dir", str(layout.probe_dir / "work")]
+    if cfg.fisher_output_mse:
+        # h-detail blobs carry per-Linear g² / H_diag that the fisher sidecar
+        # emitter needs. Adding --h-detail-dir changes the probe's content
+        # cache key (h_detail_dir is in prismaquant's _CONTENT_META_KEYS), so
+        # the first run after toggling fisher_output_mse will re-probe.
+        h_detail_dir = layout.probe_dir / "h-detail"
+        h_detail_dir.mkdir(parents=True, exist_ok=True)
+        probe_cmd += ["--h-detail-dir", str(h_detail_dir)]
+        _log(layout, "C", f"C. fisher_output_mse=true → h-detail-dir={h_detail_dir}")
+    rc = _run(probe_cmd, layout.logs_dir / "stage-C.log",
               env=subprocess_env(cfg))
     if rc != 0 or not probe_path.exists():
         raise SystemExit(
@@ -254,8 +263,74 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
     return cache
 
 
+def stage_e_pre_sidecar(cfg: Config, layout: Layout, probe_path: Path,
+                         safetensors_dir: Path) -> Optional[Path]:
+    """Stage E-pre — emit per-tensor Fisher sidecars for llama-quantize-cost.
+
+    Runs only when cfg.fisher_output_mse is set. Reads probe.pkl + act-cache
+    + h-detail blobs (all produced by Stage C in fisher mode), maps HF
+    Linear names to GGUF tensor names via the same bridge logic the bridge
+    stage uses, and writes one `.bin` per GGUF target to `work/fisher-sidecar/`.
+
+    Idempotent: re-running with an existing non-empty sidecar dir is fine
+    (files are atomically renamed; absent ones get written). Returns the
+    sidecar directory path, or None when fisher mode is off.
+    """
+    if not cfg.fisher_output_mse:
+        return None
+    sidecar_dir = layout.work / "fisher-sidecar"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    h_detail_dir = layout.probe_dir / "h-detail"
+    n_hidden, n_nextn = _read_layer_counts(safetensors_dir)
+    _log(layout, "E", f"E-pre. emitting fisher sidecars → {sidecar_dir}")
+    emit_script = _bundled_script("emit_fisher_sidecar.py")
+    cmd = [sys.executable, str(emit_script),
+           "--probe", str(probe_path),
+           "--output-dir", str(sidecar_dir)]
+    if n_hidden is not None:
+        cmd += ["--n-hidden-layers", str(n_hidden)]
+    if n_nextn:
+        cmd += ["--n-nextn-layers", str(n_nextn)]
+    if h_detail_dir.exists():
+        cmd += ["--h-detail-dir", str(h_detail_dir)]
+    else:
+        _log(layout, "E", "E-pre. WARN: no h-detail dir — fisher weights "
+                          "fall back to uniform; column will reflect "
+                          "unweighted per-row output MSE instead of true "
+                          "Fisher weighting")
+    rc = _run(cmd, layout.logs_dir / "stage-E-pre.log",
+              env=subprocess_env(cfg))
+    if rc != 0:
+        raise SystemExit(f"FAIL: E-pre fisher sidecar emit exit={rc}")
+    n_written = sum(1 for _ in sidecar_dir.glob("*.bin"))
+    _log(layout, "E", f"E-pre. wrote {n_written} sidecars")
+    return sidecar_dir
+
+
+def _read_layer_counts(safetensors_dir: Path) -> tuple[Optional[int], int]:
+    """Pluck (num_hidden_layers, num_nextn_predict_layers) from config.json.
+    Mirrors stage_f_bridge's logic — kept local so emit-sidecar can run before
+    bridge if a future stage rearranges things."""
+    config_json = safetensors_dir / "config.json"
+    if not config_json.exists():
+        return (None, 0)
+    try:
+        with config_json.open() as f:
+            hf_cfg = json.load(f)
+    except Exception:
+        return (None, 0)
+    text_cfg = hf_cfg.get("text_config", hf_cfg)
+    n_hidden = (text_cfg.get("num_hidden_layers")
+                or hf_cfg.get("num_hidden_layers"))
+    n_nextn = (text_cfg.get("num_nextn_predict_layers")
+               or hf_cfg.get("num_nextn_predict_layers")
+               or 0)
+    return (int(n_hidden) if n_hidden is not None else None, int(n_nextn))
+
+
 def stage_e_costs(cfg: Config, layout: Layout, bf16_path: Path,
-                  imatrix_path: Path) -> Path:
+                  imatrix_path: Path,
+                  fisher_sidecar_dir: Optional[Path] = None) -> Path:
     """Stage E — per-(tensor, format) MSE measurement.
 
     Resume-safe: the output costs.csv is content-addressed under
@@ -264,11 +339,19 @@ def stage_e_costs(cfg: Config, layout: Layout, bf16_path: Path,
     write to a `.tmp` path and atomically rename on rc=0, so a killed
     Stage E never leaves a partial CSV that a future run might mistake
     for a complete one.
+
+    When `fisher_sidecar_dir` is provided, llama-quantize-cost emits a
+    `fisher_output_mse` column. We fold that into the formats_hash so the
+    cache namespace cleanly partitions fisher-on vs fisher-off runs and we
+    never serve a fisher-off cache to a fisher-on caller.
     """
     bf16_sha = _file_sha256(bf16_path)
     imatrix_sha = _file_sha256(imatrix_path)
     import hashlib as _hashlib
-    formats_hash = _hashlib.sha256(",".join(cfg.quants).encode()).hexdigest()
+    fmt_key = ",".join(cfg.quants)
+    if fisher_sidecar_dir is not None:
+        fmt_key = "fisher+" + fmt_key
+    formats_hash = _hashlib.sha256(fmt_key.encode()).hexdigest()
     costs = layout.costs_cache_path(bf16_sha, imatrix_sha, formats_hash)
 
     if costs.exists():
@@ -302,13 +385,16 @@ def stage_e_costs(cfg: Config, layout: Layout, bf16_path: Path,
         # treat partial output as cached.
         tmp.unlink()
 
-    rc = _run([str(cost_bin),
-               "--model", str(bf16_path),
-               "--types", ",".join(cfg.quants),
-               "--imatrix", str(imatrix_path),
-               "--include-regex", include_regex,
-               "--output", str(tmp)],
-              layout.logs_dir / "stage-E.log",
+    cmd = [str(cost_bin),
+           "--model", str(bf16_path),
+           "--types", ",".join(cfg.quants),
+           "--imatrix", str(imatrix_path),
+           "--include-regex", include_regex,
+           "--output", str(tmp)]
+    if fisher_sidecar_dir is not None:
+        cmd += ["--fisher-sidecar", str(fisher_sidecar_dir)]
+        _log(layout, "E", f"E. fisher sidecar dir: {fisher_sidecar_dir}")
+    rc = _run(cmd, layout.logs_dir / "stage-E.log",
               env=subprocess_env(cfg))
     if rc != 0 or not tmp.exists():
         # Clean up partial tmp before failing so a re-run starts fresh.
@@ -1071,8 +1157,13 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
     else:
         imatrix_path = stage_d_imatrix(cfg, layout, bf16_path, imatrix_corpus)
 
+    # E-pre: fisher sidecar emission (no-op unless cfg.fisher_output_mse).
+    fisher_sidecar_dir = stage_e_pre_sidecar(cfg, layout, probe_path,
+                                              safetensors_dir)
+
     # E–H
-    costs_path = stage_e_costs(cfg, layout, bf16_path, imatrix_path)
+    costs_path = stage_e_costs(cfg, layout, bf16_path, imatrix_path,
+                                fisher_sidecar_dir=fisher_sidecar_dir)
     purge_ctx.costs_path = costs_path     # for --purge yes cleanup of shared cache
     bridge_path, mtp_tensors_path = stage_f_bridge(cfg, layout, probe_path,
                                                     safetensors_dir)

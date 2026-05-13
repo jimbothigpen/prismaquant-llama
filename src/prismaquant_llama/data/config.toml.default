@@ -145,6 +145,26 @@ mtp_format = "BF16"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# fisher_output_mse — when true, add Fisher row-weighted output MSE to the
+# costs.csv produced by Stage E. Requires the post-2026-05-13 build of
+# llama-quantize-cost (which exposes --fisher-sidecar). Pipeline impact:
+#
+#   - Stage C also emits an h-detail dir (per-Linear g² / H-diag blobs).
+#     Roughly doubles probe-output disk; reuses the same calibration pass.
+#   - A new step between Stage F (bridge) and Stage E (costs) emits one
+#     binary sidecar per direct-measured GGUF tensor, in `work/fisher-sidecar/`.
+#   - llama-quantize-cost is invoked with --fisher-sidecar and writes a
+#     `fisher_output_mse` column alongside the existing `mse` column.
+#
+# The bundled allocator only consumes the new column when the env var
+# PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR=1 is set (mirrors upstream
+# prismaquant's opt-in gate). With the env var unset, the column is
+# computed but ignored — useful for A/B comparison.
+# ──────────────────────────────────────────────────────────────────────────────
+fisher_output_mse = false
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # budget — target final GGUF size as a percentage of the BF16 GGUF size.
 # Reference points (approximate, model-dependent):
 #   - Q8_0    → ~50%

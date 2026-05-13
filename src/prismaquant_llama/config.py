@@ -80,6 +80,14 @@ class Config:
     precondition_mode: str = "off"
     precondition_bpw_floor: float = 4.0
 
+    # Fisher row-weighted output MSE. When True, Stage C also writes an
+    # h-detail dir (per-Linear g²/H-diag blobs), a new step between F and E
+    # emits per-tensor sidecar binaries, and llama-quantize-cost receives
+    # --fisher-sidecar so its costs.csv gains a `fisher_output_mse` column.
+    # The bundled allocator only consumes that column when env
+    # PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR=1 is set (mirrors upstream).
+    fisher_output_mse: bool = False
+
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -169,6 +177,8 @@ def load_config(config_path: Optional[Path] = None,
 
     mtp_format = str(section.get("mtp_format") or "BF16").strip().upper()
 
+    fisher_output_mse = bool(section.get("fisher_output_mse", False))
+
     # Stage F+ lives in its own top-level [precondition] table for room to
     # grow as P2-P5 add method-specific knobs (awq strategy, gptq damping,
     # halo seed, etc.). Missing table → defaults (mode=off, bpw_floor=4.0).
@@ -216,6 +226,7 @@ def load_config(config_path: Optional[Path] = None,
         mtp_format=mtp_format,
         precondition_mode=precondition_mode,
         precondition_bpw_floor=precondition_bpw_floor,
+        fisher_output_mse=fisher_output_mse,
         config_path=config_path,
     )
 
