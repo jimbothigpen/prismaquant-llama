@@ -9,6 +9,23 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-17 — Stage K dedup hash narrowed to inner assignments
+
+- `stage_k_validate` now hashes the inner `recipe` (per-tensor
+  assignment dict) in canonical-JSON form, not the whole recipe file.
+  The allocator records `priority`, `weights`, `lambda`, and
+  `loss_surrogate` in the recipe JSON too; those vary by priority even
+  under saturated-λ, so the prior full-file SHA never collided in
+  practice — the dedup loop shipped in S7 was dead code on real data.
+- Verified against a 9-priority × 5-budget sweep on cached Qwopus3.5-9B
+  bridge/costs: at saturated budgets (1.6/1.8/2.5 GB) all nine
+  priorities collapse to one assignment-SHA; at near-floor budgets
+  (2.0/2.2 GB) three pairs collide. Of 45 recipes, 30 would now be
+  short-circuited; previously zero.
+- No `schema_version` bump: the `recipe_sha` field's *semantics* change
+  (full-file → inner-recipe canonical hash) but no consumer compared
+  pre/post-S7 SHAs across summaries — show-frontier only displays them.
+
 ### 2026-05-17 — `show-frontier --from-explore` overlay
 
 - `show-frontier` gained `--from-explore PATH` which reads an `explore`
