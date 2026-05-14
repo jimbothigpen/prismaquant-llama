@@ -28,12 +28,18 @@ Usage:
     prismaquant-llama show-frontier INPUT --output-csv frontier.csv \\
         --output-json frontier.json --output-md frontier.md
         Also emit machine-readable forms alongside the stdout table.
+
+    prismaquant-llama show-frontier INPUT --from-explore explore.csv
+        Attach simulator-predicted size + ΔPPL from a prior `explore`
+        CSV alongside the measured Stage-K columns. Join key is
+        (budget_pct from `summary-PQ{N}` filename, priority).
 """
 
 from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -41,6 +47,39 @@ from typing import Optional
 
 from .config import load_config
 from .input_resolver import sanitize_model_name
+
+
+_SUMMARY_BUDGET_PCT_RE = re.compile(r"summary-PQ(\d+)")
+
+
+def _load_explore_overlay(path: Path) -> dict[tuple[int, str], dict]:
+    """Read an `explore` CSV into a lookup keyed by (budget_pct, priority).
+
+    `explore` emits one row per (budget_pct, priority) cell with the
+    simulator-predicted size + ppl-delta + tg/pp. This map lets
+    show-frontier attach predicted metrics to each measured candidate
+    so users can compare simulator vs reality at a glance.
+    """
+    out: dict[tuple[int, str], dict] = {}
+    with path.open() as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                bpct = int(row["budget_pct"])
+            except (KeyError, ValueError):
+                continue
+            pri = row.get("priority")
+            if pri is None:
+                continue
+            out[(bpct, pri)] = row
+    return out
+
+
+def _summary_budget_pct(summary_path: Path) -> Optional[int]:
+    m = _SUMMARY_BUDGET_PCT_RE.search(summary_path.name)
+    if m is None:
+        return None
+    return int(m.group(1))
 
 
 def _find_run_dirs(layout_base: Path, model_name: str,
@@ -56,39 +95,65 @@ def _find_run_dirs(layout_base: Path, model_name: str,
     return matches
 
 
-def _summary_record(run_dir: Path, summary_path: Path) -> dict:
+def _summary_record(run_dir: Path, summary_path: Path,
+                    explore_map: Optional[dict[tuple[int, str], dict]] = None
+                    ) -> dict:
     """Parse one summary-PQ*.json into the in-memory schema shared by all
-    rendering paths (text/MD/CSV/JSON)."""
+    rendering paths (text/MD/CSV/JSON). When ``explore_map`` is given,
+    each candidate gets ``pred_size_gb``, ``pred_dppl``, and
+    ``size_diff_gb`` (measured − predicted) attached for the rendering
+    layers to surface."""
     data = json.loads(summary_path.read_text())
     candidates = data.get("candidates", [])
     rows = sorted(candidates, key=lambda r: r["size_gb"])
     winner_p = data.get("winner_priority")
     fisher = summary_path.stem.endswith("-fisher")
+    budget_pct = _summary_budget_pct(summary_path)
+    cand_records: list[dict] = []
+    for r in rows:
+        cand = {
+            "priority": r["priority"],
+            "size_gb": r["size_gb"],
+            "ppl": r["ppl"],
+            "is_pareto": bool(r.get("is_pareto")),
+            "is_winner": r["priority"] == winner_p,
+            "recipe": r.get("recipe"),
+            "candidate_gguf": r.get("candidate_gguf"),
+            "recipe_sha": r.get("recipe_sha"),
+            "duplicate_of": r.get("duplicate_of"),
+        }
+        if explore_map is not None and budget_pct is not None:
+            hit = explore_map.get((budget_pct, r["priority"]))
+            if hit is not None:
+                try:
+                    pred_size = float(hit.get("actual_GB"))
+                    pred_dppl = float(hit.get("predicted_dppl"))
+                except (TypeError, ValueError):
+                    pred_size = None
+                    pred_dppl = None
+                cand["pred_size_gb"] = pred_size
+                cand["pred_dppl"] = pred_dppl
+                cand["size_diff_gb"] = (r["size_gb"] - pred_size
+                                        if pred_size is not None else None)
+            else:
+                cand["pred_size_gb"] = None
+                cand["pred_dppl"] = None
+                cand["size_diff_gb"] = None
+        cand_records.append(cand)
     return {
         "run": run_dir.name,
         "summary_file": summary_path.name,
         "summary_path": str(summary_path),
         "summary_schema_version": data.get("schema_version"),
         "budget_gb": data.get("budget_gb"),
+        "budget_pct": budget_pct,
         "user_priority": data.get("user_priority"),
         "winner_priority": winner_p,
         "winner_ppl": data.get("winner_ppl"),
         "winner_size_gb": data.get("winner_size_gb"),
         "fisher": fisher,
-        "candidates": [
-            {
-                "priority": r["priority"],
-                "size_gb": r["size_gb"],
-                "ppl": r["ppl"],
-                "is_pareto": bool(r.get("is_pareto")),
-                "is_winner": r["priority"] == winner_p,
-                "recipe": r.get("recipe"),
-                "candidate_gguf": r.get("candidate_gguf"),
-                "recipe_sha": r.get("recipe_sha"),
-                "duplicate_of": r.get("duplicate_of"),
-            }
-            for r in rows
-        ],
+        "has_explore_overlay": explore_map is not None,
+        "candidates": cand_records,
     }
 
 
@@ -97,6 +162,12 @@ def _render_text(rec: dict) -> str:
     if not rows:
         return f"== {rec['summary_file']} ==  (empty)\n"
     n_pareto = sum(1 for r in rows if r["is_pareto"])
+    overlay = rec.get("has_explore_overlay", False)
+    header_cols = (f"  {'priority':<10} {'size_gb':>9} {'ppl':>10}  "
+                   f"{'pareto':<7} {'winner':<6}")
+    if overlay:
+        header_cols += (f" {'pred_GB':>9} {'pred_ΔPPL':>10} "
+                        f"{'sizeΔ':>8}")
     lines = [
         f"== {rec['summary_file']} ==",
         f"  path             : {rec['summary_path']}",
@@ -107,14 +178,28 @@ def _render_text(rec: dict) -> str:
         f"  winner_size_gb   : {rec['winner_size_gb']:.2f}",
         f"  pareto_frontier  : {n_pareto}/{len(rows)}",
         "",
-        f"  {'priority':<10} {'size_gb':>9} {'ppl':>10}  "
-        f"{'pareto':<7} {'winner':<6}",
+        header_cols,
     ]
     for r in rows:
         pareto = "*" if r["is_pareto"] else " "
         winner = "★" if r["is_winner"] else " "
-        lines.append(f"  {r['priority']:<10} {r['size_gb']:>9.2f} "
-                     f"{r['ppl']:>10.4f}  {pareto:<7} {winner:<6}")
+        line = (f"  {r['priority']:<10} {r['size_gb']:>9.2f} "
+                f"{r['ppl']:>10.4f}  {pareto:<7} {winner:<6}")
+        if overlay:
+            pred_gb = r.get("pred_size_gb")
+            pred_dppl = r.get("pred_dppl")
+            diff = r.get("size_diff_gb")
+            line += (
+                f" {pred_gb:>9.2f}" if pred_gb is not None else f" {'—':>9}"
+            )
+            line += (
+                f" {pred_dppl:>+10.3f}" if pred_dppl is not None
+                else f" {'—':>10}"
+            )
+            line += (
+                f" {diff:>+8.2f}" if diff is not None else f" {'—':>8}"
+            )
+        lines.append(line)
     lines.append("")
     return "\n".join(lines)
 
@@ -122,6 +207,7 @@ def _render_text(rec: dict) -> str:
 def _render_markdown(rec: dict) -> str:
     """Render one summary as a Markdown section + table."""
     rows = rec["candidates"]
+    overlay = rec.get("has_explore_overlay", False)
     header_lines = [
         f"### {rec['summary_file']}",
         "",
@@ -138,35 +224,56 @@ def _render_markdown(rec: dict) -> str:
     if not rows:
         header_lines.append("_(no candidates)_")
         return "\n".join(header_lines) + "\n"
-    header_lines += [
-        "| priority | size_gb | ppl | pareto | winner |",
-        "|---|---:|---:|:---:|:---:|",
-    ]
+    if overlay:
+        header_lines += [
+            "| priority | size_gb | ppl | pareto | winner | "
+            "pred_size_gb | pred_dppl | size_diff_gb |",
+            "|---|---:|---:|:---:|:---:|---:|---:|---:|",
+        ]
+    else:
+        header_lines += [
+            "| priority | size_gb | ppl | pareto | winner |",
+            "|---|---:|---:|:---:|:---:|",
+        ]
     for r in rows:
         pareto = "*" if r["is_pareto"] else ""
         winner = "★" if r["is_winner"] else ""
-        header_lines.append(
-            f"| `{r['priority']}` | {r['size_gb']:.2f} | {r['ppl']:.4f} "
-            f"| {pareto} | {winner} |"
-        )
+        row = (f"| `{r['priority']}` | {r['size_gb']:.2f} | {r['ppl']:.4f} "
+               f"| {pareto} | {winner} |")
+        if overlay:
+            pred_gb = r.get("pred_size_gb")
+            pred_dppl = r.get("pred_dppl")
+            diff = r.get("size_diff_gb")
+            row += (f" {pred_gb:.2f} |" if pred_gb is not None else " — |")
+            row += (f" {pred_dppl:+.3f} |" if pred_dppl is not None
+                    else " — |")
+            row += (f" {diff:+.2f} |" if diff is not None else " — |")
+        header_lines.append(row)
     return "\n".join(header_lines) + "\n"
 
 
 def _write_csv(records: list[dict], out_path: Path) -> None:
-    """One row per candidate, joined with its parent summary's metadata."""
+    """One row per candidate, joined with its parent summary's metadata.
+
+    Overlay columns (``pred_size_gb``, ``pred_dppl``, ``size_diff_gb``)
+    are only added when at least one record was rendered with an
+    explore overlay attached."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    overlay = any(rec.get("has_explore_overlay") for rec in records)
     fieldnames = [
         "run", "summary_file", "budget_gb", "fisher",
         "user_priority", "winner_priority",
         "priority", "size_gb", "ppl", "is_pareto", "is_winner",
         "duplicate_of", "recipe_sha",
     ]
+    if overlay:
+        fieldnames += ["pred_size_gb", "pred_dppl", "size_diff_gb"]
     with out_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for rec in records:
             for cand in rec["candidates"]:
-                w.writerow({
+                row = {
                     "run": rec["run"],
                     "summary_file": rec["summary_file"],
                     "budget_gb": rec["budget_gb"],
@@ -180,7 +287,15 @@ def _write_csv(records: list[dict], out_path: Path) -> None:
                     "is_winner": cand["is_winner"],
                     "duplicate_of": cand.get("duplicate_of") or "",
                     "recipe_sha": cand.get("recipe_sha") or "",
-                })
+                }
+                if overlay:
+                    psg = cand.get("pred_size_gb")
+                    pdp = cand.get("pred_dppl")
+                    sdg = cand.get("size_diff_gb")
+                    row["pred_size_gb"] = round(psg, 4) if psg is not None else ""
+                    row["pred_dppl"] = round(pdp, 4) if pdp is not None else ""
+                    row["size_diff_gb"] = round(sdg, 4) if sdg is not None else ""
+                w.writerow(row)
 
 
 def _write_json(records: list[dict], out_path: Path) -> None:
@@ -230,10 +345,29 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="also write the aggregated frontier(s) as JSON")
     p.add_argument("--output-md", type=Path, default=None,
                    help="also write the frontier(s) as a Markdown document")
+    p.add_argument("--from-explore", type=Path, default=None,
+                   help="path to an `explore` CSV (`explore --output-csv "
+                        "PATH`); when present, each candidate gets "
+                        "predicted size + ΔPPL alongside measured values "
+                        "for simulator-vs-reality comparison. Join key is "
+                        "(budget_pct from summary filename, priority).")
     args = p.parse_args(argv)
 
     cfg = load_config(args.config)
     base = (args.base or cfg.base).expanduser().resolve()
+
+    explore_map: Optional[dict[tuple[int, str], dict]] = None
+    if args.from_explore is not None:
+        if not args.from_explore.exists():
+            print(f"show-frontier: --from-explore path not found: "
+                  f"{args.from_explore}", file=sys.stderr)
+            return 1
+        explore_map = _load_explore_overlay(args.from_explore)
+        if not explore_map:
+            print(f"show-frontier: --from-explore CSV has no usable "
+                  f"(budget_pct, priority) rows: {args.from_explore}",
+                  file=sys.stderr)
+            return 1
 
     model_name = sanitize_model_name(args.input)
     runs = _find_run_dirs(base, model_name, args.run)
@@ -258,7 +392,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             continue
         summaries = sorted(stage_k.glob(glob_pat))
         for s in summaries:
-            records.append(_summary_record(run_dir, s))
+            records.append(_summary_record(run_dir, s, explore_map))
 
     if not records:
         print(f"show-frontier: no Stage-K summaries matched in "

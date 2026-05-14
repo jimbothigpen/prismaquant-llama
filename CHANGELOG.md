@@ -9,6 +9,22 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-17 — `show-frontier --from-explore` overlay
+
+- `show-frontier` gained `--from-explore PATH` which reads an `explore`
+  CSV (`explore --output-csv PATH`) and attaches simulator-predicted
+  size + ΔPPL alongside each measured Stage-K candidate. Join key is
+  `(budget_pct extracted from summary-PQ{N} filename, priority)`.
+- New candidate fields when overlay is active: `pred_size_gb`,
+  `pred_dppl`, `size_diff_gb` (measured − predicted).
+- Renderers conditionally extend their column sets only when overlay
+  is in use — text adds `pred_GB / pred_ΔPPL / sizeΔ`; Markdown adds
+  the same; CSV adds `pred_size_gb / pred_dppl / size_diff_gb`. Calls
+  without `--from-explore` produce byte-identical output to before.
+- JSON adds `has_explore_overlay` (per record) and `budget_pct` so
+  downstream consumers can detect overlay-enabled documents without
+  parsing the filename.
+
 ### 2026-05-17 — Stage K cross-priority recipe dedup
 
 - Stage K now short-circuits identical recipes across priorities by
