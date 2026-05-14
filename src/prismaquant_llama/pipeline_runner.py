@@ -88,6 +88,26 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _compute_recipe_sha(recipe_path: Path) -> str:
+    """SHA256 of the recipe's inner per-tensor assignments only.
+
+    The allocator records `priority`, `weights`, `lambda`, and
+    `loss_surrogate` alongside `recipe` in the same JSON — those vary
+    by priority even when saturated-λ makes the assignments themselves
+    byte-identical across priorities. Hashing the inner `recipe` dict
+    is what catches that collision, which is the case Stage-K dedup
+    was designed for.
+    """
+    try:
+        recipe_doc = json.loads(recipe_path.read_text())
+        assignments = recipe_doc.get("recipe", recipe_doc)
+    except json.JSONDecodeError:
+        assignments = {"_raw": recipe_path.read_bytes().decode("latin-1")}
+    canonical = json.dumps(assignments, sort_keys=True,
+                           separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _find_convert_script(cfg: Config) -> Path:
     """Locate convert_hf_to_gguf.py from the llama.cpp source tree.
 
@@ -634,20 +654,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
             if rc != 0 or not recipe_path.exists():
                 raise SystemExit(f"FAIL: K allocator @ priority={p} exit={rc}")
 
-        # Hash only the inner per-tensor assignments. The allocator also
-        # records `priority`, `weights`, `lambda`, and `loss_surrogate` in
-        # the recipe JSON; those vary by priority even when saturated-λ
-        # makes the assignments byte-identical across priorities. Hashing
-        # the full file therefore never collided — exactly the case dedup
-        # was designed to catch.
-        try:
-            recipe_doc = json.loads(recipe_path.read_text())
-            assignments = recipe_doc.get("recipe", recipe_doc)
-        except json.JSONDecodeError:
-            assignments = {"_raw": recipe_path.read_bytes().decode("latin-1")}
-        canonical = json.dumps(assignments, sort_keys=True,
-                               separators=(",", ":")).encode()
-        recipe_sha = hashlib.sha256(canonical).hexdigest()
+        recipe_sha = _compute_recipe_sha(recipe_path)
         prior = seen_recipes.get(recipe_sha)
         if prior is not None:
             _log(layout, "K",
