@@ -585,6 +585,12 @@ def stage_k_validate(cfg: Config, layout: Layout,
     perp_bin = find_tool(cfg, "llama-perplexity")
     quantize_bin = find_tool(cfg, "llama-quantize")
     results: list[dict] = []
+    # Recipe-SHA → first result entry that produced it. When the allocator
+    # resolves two priorities to byte-identical recipes (common on wide
+    # priority sweeps when the budget pins the same tensor assignments),
+    # the second occurrence reuses the first's quantize + PPL artifacts
+    # and is recorded as a `duplicate_of` candidate in the summary.
+    seen_recipes: dict[str, dict] = {}
 
     for p in sweep_priorities:
         recipe_path = (layout.recipes_dir
@@ -628,6 +634,24 @@ def stage_k_validate(cfg: Config, layout: Layout,
             if rc != 0 or not recipe_path.exists():
                 raise SystemExit(f"FAIL: K allocator @ priority={p} exit={rc}")
 
+        recipe_sha = hashlib.sha256(recipe_path.read_bytes()).hexdigest()
+        prior = seen_recipes.get(recipe_sha)
+        if prior is not None:
+            _log(layout, "K",
+                 f"K. priority={p} recipe matches priority={prior['priority']} "
+                 f"(sha {recipe_sha[:12]}); reusing PPL={prior['ppl']:.4f} "
+                 f"size={prior['size_gb']:.2f} GB (skip quantize + PPL)")
+            results.append({
+                "priority": p,
+                "recipe": str(recipe_path),
+                "candidate_gguf": prior["candidate_gguf"],
+                "ppl": prior["ppl"],
+                "size_gb": prior["size_gb"],
+                "recipe_sha": recipe_sha,
+                "duplicate_of": prior["priority"],
+            })
+            continue
+
         recipe_txt = _h_materialize_recipe_txt(recipe_path)
         cand_gguf = work / f"candidate-PQ{cfg.budget}-{p}{suffix}.gguf"
 
@@ -670,13 +694,16 @@ def stage_k_validate(cfg: Config, layout: Layout,
         size_gb = cand_gguf.stat().st_size / 1024**3
         _log(layout, "K",
              f"K. priority={p}  PPL={ppl:.4f}  size={size_gb:.2f} GB")
-        results.append({
+        entry = {
             "priority": p,
             "recipe": str(recipe_path),
             "candidate_gguf": str(cand_gguf),
             "ppl": ppl,
             "size_gb": size_gb,
-        })
+            "recipe_sha": recipe_sha,
+        }
+        results.append(entry)
+        seen_recipes[recipe_sha] = entry
 
     if not results:
         raise SystemExit("FAIL: K no candidates produced a Final estimate; "
@@ -703,7 +730,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
         validated.with_suffix(".txt").write_text(src_txt.read_text())
 
     summary_path.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": 2,
         "budget_gb": budget_gb,
         "user_priority": cfg.priority,
         "winner_priority": winner["priority"],

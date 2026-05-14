@@ -9,6 +9,28 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-17 — Stage K cross-priority recipe dedup
+
+- Stage K now short-circuits identical recipes across priorities by
+  SHA-256 of the recipe JSON. When the allocator resolves a later
+  priority to byte-identical tensor assignments (common on wide
+  priority sweeps where the budget pins the same recipe across several
+  priority strings), the second occurrence reuses the first's
+  quantize + PPL artifacts instead of re-running them.
+- Summary candidates now carry two new optional fields: `recipe_sha`
+  (hex SHA-256 of the recipe JSON) and `duplicate_of` (the priority
+  string of the original entry whose result was reused). Pareto
+  semantics are unchanged: identical `(size_gb, ppl)` points stay on
+  the frontier together.
+- `summary-PQ<budget>{,-fisher}.json` `schema_version` bumped to `2`
+  to reflect the new optional candidate fields. The `show-frontier`
+  parser remains `.get`-based, so pre-S7 summaries continue to load
+  identically; pre-S7 summaries report `summary_schema_version: 1` in
+  the show-frontier JSON output.
+- `show-frontier --output-csv` gains `duplicate_of` + `recipe_sha`
+  columns; `--output-json` carries the same fields per candidate plus
+  `summary_schema_version` per frontier.
+
 ### 2026-05-17 — Stage K summary schema versioning + `show-frontier` docs
 
 - Stage K (`stage_k_validate`) now writes `"schema_version": 1` as the

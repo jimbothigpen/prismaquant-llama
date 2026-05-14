@@ -68,6 +68,7 @@ def _summary_record(run_dir: Path, summary_path: Path) -> dict:
         "run": run_dir.name,
         "summary_file": summary_path.name,
         "summary_path": str(summary_path),
+        "summary_schema_version": data.get("schema_version"),
         "budget_gb": data.get("budget_gb"),
         "user_priority": data.get("user_priority"),
         "winner_priority": winner_p,
@@ -83,6 +84,8 @@ def _summary_record(run_dir: Path, summary_path: Path) -> dict:
                 "is_winner": r["priority"] == winner_p,
                 "recipe": r.get("recipe"),
                 "candidate_gguf": r.get("candidate_gguf"),
+                "recipe_sha": r.get("recipe_sha"),
+                "duplicate_of": r.get("duplicate_of"),
             }
             for r in rows
         ],
@@ -156,6 +159,7 @@ def _write_csv(records: list[dict], out_path: Path) -> None:
         "run", "summary_file", "budget_gb", "fisher",
         "user_priority", "winner_priority",
         "priority", "size_gb", "ppl", "is_pareto", "is_winner",
+        "duplicate_of", "recipe_sha",
     ]
     with out_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
@@ -174,6 +178,8 @@ def _write_csv(records: list[dict], out_path: Path) -> None:
                     "ppl": cand["ppl"],
                     "is_pareto": cand["is_pareto"],
                     "is_winner": cand["is_winner"],
+                    "duplicate_of": cand.get("duplicate_of") or "",
+                    "recipe_sha": cand.get("recipe_sha") or "",
                 })
 
 
