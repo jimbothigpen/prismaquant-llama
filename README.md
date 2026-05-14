@@ -19,8 +19,9 @@ subdirectory, and rebuild.
 > is [RobTand](https://github.com/RobTand/prismaquant)'s work.
 
 > **Status: alpha.** End-to-end pipeline executes through all nine stages
-> (A→I) without manual intervention. Three CLI subcommands (`run`,
-> `calibrate`, `explore`); persistent defaults via a hand-edited TOML config.
+> (A→I) without manual intervention. Four CLI subcommands (`run`,
+> `calibrate`, `explore`, `show-frontier`); persistent defaults via a
+> hand-edited TOML config.
 
 ## What this does
 
@@ -77,12 +78,13 @@ workflow.
 
 ## Usage
 
-Three subcommands.
+Four subcommands.
 
 ```bash
 prismaquant-llama run INPUT [flags]
 prismaquant-llama calibrate {system|model} INPUT [flags]
 prismaquant-llama explore INPUT --budgets ... --priorities ... [flags]
+prismaquant-llama show-frontier INPUT [flags]
 ```
 
 ### `run` — full pipeline
@@ -198,6 +200,55 @@ mixing — but it surfaces backend-specific quality issues directly:
 e.g. on Vulkan the IQ4_KSS quality regression shows up as a large
 predicted ΔPPL on rows where the allocator picks IQ4_KSS-heavy
 recipes, which would be invisible from the cost CSV alone.
+
+### `show-frontier` — re-display Stage K results
+
+If you enable Stage K (set `kl_validate = true` in `config.toml`), each
+`run` writes a `summary-PQ<budget>{,-fisher}.json` to its per-run
+`work/<run>/stage-k/` directory. The summary records every priority the
+validator quantized + measured, with `is_pareto: bool` annotations and
+the chosen winner.
+
+`show-frontier` reads those summaries back without re-running anything:
+
+```bash
+prismaquant-llama show-frontier unsloth/gemma-3-4b-it
+prismaquant-llama show-frontier Qwen3.5-4B --budget 25 --all-runs
+prismaquant-llama show-frontier Qwen3.5-4B \
+    --output-csv frontier.csv \
+    --output-json frontier.json \
+    --output-md frontier.md
+```
+
+INPUT accepts any of the forms `run` does — HF id, safetensors dir,
+GGUF, or just the bare sanitized model name (e.g. `Qwen3.5-4B`). The
+input does **not** need to still exist on disk; only the historical
+`work/<run>/` directory has to.
+
+Filters:
+
+- `--budget N` — restrict to one PQ budget (matches summaries for that
+  budget across the run, including `-fisher` variants).
+- `--run LABEL` — exact run label (e.g. `Qwen3.5-4B-20260515-103000`).
+  Default: latest run for the model.
+- `--all-runs` — render every run for the model, not just the latest.
+
+Stdout is always a human-readable table grouped by run, with `*` marking
+Pareto candidates and `★` marking the winner. The optional outputs all
+share the same in-memory shape and may be combined freely:
+
+- `--output-csv PATH` — one row per candidate; columns include `run,
+  summary_file, budget_gb, fisher, user_priority, winner_priority,
+  priority, size_gb, ppl, is_pareto, is_winner`.
+- `--output-json PATH` — aggregated `{schema_version: 1, frontiers:
+  [...]}` document; each frontier carries `recipe` and `candidate_gguf`
+  paths.
+- `--output-md PATH` — Markdown document with one section per summary.
+
+Stage K's `summary-PQ*.json` files also carry `schema_version: 1` at the
+top level (added 2026-05-17). Older summaries written before that date
+lack the key but parse identically — `show-frontier` reads them
+unchanged.
 
 ### Universal flags
 

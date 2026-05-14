@@ -703,6 +703,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
         validated.with_suffix(".txt").write_text(src_txt.read_text())
 
     summary_path.write_text(json.dumps({
+        "schema_version": 1,
         "budget_gb": budget_gb,
         "user_priority": cfg.priority,
         "winner_priority": winner["priority"],
