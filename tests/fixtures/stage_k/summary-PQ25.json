@@ -1,0 +1,108 @@
+{
+  "schema_version": 2,
+  "budget_gb": 0.351,
+  "user_priority": "111",
+  "winner_priority": "111",
+  "winner_ppl": 57.824,
+  "winner_size_gb": 0.4246135950088501,
+  "candidates": [
+    {
+      "priority": "111",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-111.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "is_pareto": true
+    },
+    {
+      "priority": "009",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-009.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-009.gguf",
+      "ppl": 136.969,
+      "size_gb": 0.4240795373916626,
+      "recipe_sha": "8994a2e91843e0cbe570d164d6b78d7fcf68f400ae2302cc8cbdf6f0993f9eeb",
+      "is_pareto": true
+    },
+    {
+      "priority": "090",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-090.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-009.gguf",
+      "ppl": 136.969,
+      "size_gb": 0.4240795373916626,
+      "recipe_sha": "8994a2e91843e0cbe570d164d6b78d7fcf68f400ae2302cc8cbdf6f0993f9eeb",
+      "duplicate_of": "009",
+      "is_pareto": true
+    },
+    {
+      "priority": "153",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-153.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "duplicate_of": "111",
+      "is_pareto": true
+    },
+    {
+      "priority": "225",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-225.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "duplicate_of": "111",
+      "is_pareto": true
+    },
+    {
+      "priority": "252",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-252.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "duplicate_of": "111",
+      "is_pareto": true
+    },
+    {
+      "priority": "333",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-333.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "duplicate_of": "111",
+      "is_pareto": true
+    },
+    {
+      "priority": "522",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-522.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "duplicate_of": "111",
+      "is_pareto": true
+    },
+    {
+      "priority": "531",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-531.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "duplicate_of": "111",
+      "is_pareto": true
+    },
+    {
+      "priority": "900",
+      "recipe": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/recipes/recipe-PQ25-900.json",
+      "candidate_gguf": "/home/builduser/.prismaquant-llama/work/Qwen3-0.6B-20260513-221345/stage-k/candidate-PQ25-111.gguf",
+      "ppl": 57.824,
+      "size_gb": 0.4246135950088501,
+      "recipe_sha": "cad0ddfdc14c11169a2cfc4df108c354dcbc944f46162a39e7aa91771378acbc",
+      "duplicate_of": "111",
+      "is_pareto": true
+    }
+  ]
+}
