@@ -1660,11 +1660,35 @@ def cfg_from_args(args) -> Config:
     return cfg
 
 
+# Stage B shells out to convert_hf_to_gguf.py with the same Python
+# interpreter; that script imports gguf / sentencepiece / google.protobuf.
+# A missing dep otherwise crashes Stage B ~30s in (after HF download).
+_STAGE_B_DEPS = (
+    ("gguf", "gguf (must be fork-vendored gguf-py 0.18.0)"),
+    ("sentencepiece", "sentencepiece"),
+    ("google.protobuf", "protobuf"),
+)
+
+
+def _preflight_check_run_deps() -> None:
+    import importlib.util
+    missing = [pkg for mod, pkg in _STAGE_B_DEPS
+               if importlib.util.find_spec(mod) is None]
+    if missing:
+        raise SystemExit(
+            "ERROR: prismaquant-llama run requires Stage B convert deps "
+            "missing from this venv: " + ", ".join(missing) + ".\n"
+            "       See the `prismaquant_venv_update_procedure` memory entry "
+            "(\"Extra deps required by Stage B's convert subprocess\")."
+        )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="prismaquant-llama run",
                                 description="Run the full prismaquant pipeline")
     add_run_args(p)
     args = p.parse_args(argv)
+    _preflight_check_run_deps()
     cfg = cfg_from_args(args)
     resolved = resolve_input(args.input, allow_gguf=False)
     try:
