@@ -9,6 +9,26 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-17 — `show-frontier` overlay v2: `ppl_diff` column (S11)
+
+- Stage K `summary-PQ*.json` schema bumped to `schema_version: 3`. New
+  optional field `reference_ppl_f16` records a one-time BF16 PPL pass
+  on `bf16_path` using byte-identical llama-perplexity flags as the
+  per-candidate runs (same `-c/-b/-ctk/-ctv/-fa/-ngl/--chunks`). The
+  reference is cached in `work/stage-k/ref-ppl-f16.json` keyed by
+  (bf16_path, ppl_corpus, chunks) so subsequent runs skip the
+  measurement when the inputs match.
+- `show-frontier --from-explore` now surfaces a `ppl_diff` column
+  (`measured_ppl − reference_ppl_f16 − pred_dppl`) in text, Markdown,
+  and CSV outputs whenever the loaded summary carries
+  `reference_ppl_f16`. v2 summaries (no reference) keep their original
+  output unchanged.
+- Aggregated `--output-json` document bumped to `schema_version: 2` to
+  reflect the new candidate-level `ppl_diff` key.
+- Three new tests under `tests/test_show_frontier_overlay.py` cover
+  v3 round-trip with ppl_diff, v3-without-explore behavior, and v2
+  backward-compat.
+
 ### 2026-05-17 — Stage K dedup hash narrowed to inner assignments
 
 - `stage_k_validate` now hashes the inner `recipe` (per-tensor

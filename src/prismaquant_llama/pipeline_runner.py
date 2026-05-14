@@ -567,6 +567,56 @@ def _mark_pareto(results: list[dict]) -> None:
         r["is_pareto"] = not dominated
 
 
+def _stage_k_reference_ppl(cfg: Config, layout: Layout, bf16_path: Path,
+                           ppl_corpus: Path, perp_bin: Path,
+                           work: Path) -> Optional[float]:
+    """One-time BF16 PPL pass paired with the Stage-K sweep config.
+
+    Uses byte-identical llama-perplexity flags to the per-candidate runs
+    (same ctx/batch/cache types/FA/ngl/chunks) so the reference is
+    directly comparable to the measured candidate PPLs. Cached in
+    ``work/ref-ppl-f16.json`` keyed by bf16_path + corpus + chunks; a
+    later run with a different bf16 or corpus invalidates automatically.
+    """
+    cache = work / "ref-ppl-f16.json"
+    key = {
+        "bf16_path": str(bf16_path),
+        "ppl_corpus": str(ppl_corpus),
+        "chunks": cfg.kl_ppl_chunks,
+    }
+    if cache.exists():
+        try:
+            cached = json.loads(cache.read_text())
+            if cached.get("key") == key and cached.get("ppl") is not None:
+                _log(layout, "K",
+                     f"K. ref PPL cached @ {cached['ppl']:.4f}")
+                return float(cached["ppl"])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    log = layout.logs_dir / "stage-K-ref-ppl-f16.log"
+    _log(layout, "K",
+         f"K. ref PPL (BF16) chunks={cfg.kl_ppl_chunks}")
+    rc = _run([str(perp_bin), "-m", str(bf16_path), "-f", str(ppl_corpus),
+               "-c", "4096", "-b", "2048",
+               "-ctk", "f16", "-ctv", "f16", "-fa", "on",
+               "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks),
+               "--no-mmap"],
+              log, env=subprocess_env(cfg))
+    import re as _re
+    m = _re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)",
+                   log.read_text())
+    if not m:
+        _log(layout, "K",
+             f"K. WARN: ref PPL has no Final estimate (rc={rc}); "
+             f"summary will omit reference_ppl_f16")
+        return None
+    ppl = float(m.group(1))
+    _log(layout, "K", f"K. ref PPL = {ppl:.4f}")
+    cache.write_text(json.dumps({"key": key, "ppl": ppl}, indent=2))
+    return ppl
+
+
 def stage_k_validate(cfg: Config, layout: Layout,
                      bridge_path: Path, costs_path: Path,
                      bf16_path: Path, imatrix_path: Path,
@@ -604,6 +654,8 @@ def stage_k_validate(cfg: Config, layout: Layout,
 
     perp_bin = find_tool(cfg, "llama-perplexity")
     quantize_bin = find_tool(cfg, "llama-quantize")
+    reference_ppl_f16 = _stage_k_reference_ppl(
+        cfg, layout, bf16_path, ppl_corpus, perp_bin, work)
     results: list[dict] = []
     # Recipe-SHA → first result entry that produced it. When the allocator
     # resolves two priorities to byte-identical recipes (common on wide
@@ -749,15 +801,18 @@ def stage_k_validate(cfg: Config, layout: Layout,
     if src_txt.exists():
         validated.with_suffix(".txt").write_text(src_txt.read_text())
 
-    summary_path.write_text(json.dumps({
-        "schema_version": 2,
+    summary_doc = {
+        "schema_version": 3,
         "budget_gb": budget_gb,
         "user_priority": cfg.priority,
         "winner_priority": winner["priority"],
         "winner_ppl": winner["ppl"],
         "winner_size_gb": winner["size_gb"],
         "candidates": results,
-    }, indent=2))
+    }
+    if reference_ppl_f16 is not None:
+        summary_doc["reference_ppl_f16"] = reference_ppl_f16
+    summary_path.write_text(json.dumps(summary_doc, indent=2))
     _log(layout, "K", f"K. summary written → {summary_path}")
     return validated
 

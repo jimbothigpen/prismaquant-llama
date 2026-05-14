@@ -109,6 +109,9 @@ def _summary_record(run_dir: Path, summary_path: Path,
     winner_p = data.get("winner_priority")
     fisher = summary_path.stem.endswith("-fisher")
     budget_pct = _summary_budget_pct(summary_path)
+    # schema_version ≥ 3 may include a paired BF16 reference PPL; ppl_diff
+    # = measured − reference − pred_dppl quantifies simulator vs reality.
+    reference_ppl_f16 = data.get("reference_ppl_f16")
     cand_records: list[dict] = []
     for r in rows:
         cand = {
@@ -135,10 +138,17 @@ def _summary_record(run_dir: Path, summary_path: Path,
                 cand["pred_dppl"] = pred_dppl
                 cand["size_diff_gb"] = (r["size_gb"] - pred_size
                                         if pred_size is not None else None)
+                if (reference_ppl_f16 is not None
+                        and pred_dppl is not None):
+                    cand["ppl_diff"] = (r["ppl"] - reference_ppl_f16
+                                        - pred_dppl)
+                else:
+                    cand["ppl_diff"] = None
             else:
                 cand["pred_size_gb"] = None
                 cand["pred_dppl"] = None
                 cand["size_diff_gb"] = None
+                cand["ppl_diff"] = None
         cand_records.append(cand)
     return {
         "run": run_dir.name,
@@ -151,8 +161,11 @@ def _summary_record(run_dir: Path, summary_path: Path,
         "winner_priority": winner_p,
         "winner_ppl": data.get("winner_ppl"),
         "winner_size_gb": data.get("winner_size_gb"),
+        "reference_ppl_f16": reference_ppl_f16,
         "fisher": fisher,
         "has_explore_overlay": explore_map is not None,
+        "has_ppl_diff": (explore_map is not None
+                         and reference_ppl_f16 is not None),
         "candidates": cand_records,
     }
 
@@ -163,11 +176,14 @@ def _render_text(rec: dict) -> str:
         return f"== {rec['summary_file']} ==  (empty)\n"
     n_pareto = sum(1 for r in rows if r["is_pareto"])
     overlay = rec.get("has_explore_overlay", False)
+    has_ppl_diff = rec.get("has_ppl_diff", False)
     header_cols = (f"  {'priority':<10} {'size_gb':>9} {'ppl':>10}  "
                    f"{'pareto':<7} {'winner':<6}")
     if overlay:
         header_cols += (f" {'pred_GB':>9} {'pred_ΔPPL':>10} "
                         f"{'sizeΔ':>8}")
+        if has_ppl_diff:
+            header_cols += f" {'ppl_diff':>10}"
     lines = [
         f"== {rec['summary_file']} ==",
         f"  path             : {rec['summary_path']}",
@@ -177,9 +193,10 @@ def _render_text(rec: dict) -> str:
         f"  winner_ppl       : {rec['winner_ppl']:.4f}",
         f"  winner_size_gb   : {rec['winner_size_gb']:.2f}",
         f"  pareto_frontier  : {n_pareto}/{len(rows)}",
-        "",
-        header_cols,
     ]
+    if rec.get("reference_ppl_f16") is not None:
+        lines.append(f"  reference_ppl_f16: {rec['reference_ppl_f16']:.4f}")
+    lines += ["", header_cols]
     for r in rows:
         pareto = "*" if r["is_pareto"] else " "
         winner = "★" if r["is_winner"] else " "
@@ -199,6 +216,11 @@ def _render_text(rec: dict) -> str:
             line += (
                 f" {diff:>+8.2f}" if diff is not None else f" {'—':>8}"
             )
+            if has_ppl_diff:
+                pd = r.get("ppl_diff")
+                line += (
+                    f" {pd:>+10.4f}" if pd is not None else f" {'—':>10}"
+                )
         lines.append(line)
     lines.append("")
     return "\n".join(lines)
@@ -208,6 +230,7 @@ def _render_markdown(rec: dict) -> str:
     """Render one summary as a Markdown section + table."""
     rows = rec["candidates"]
     overlay = rec.get("has_explore_overlay", False)
+    has_ppl_diff = rec.get("has_ppl_diff", False)
     header_lines = [
         f"### {rec['summary_file']}",
         "",
@@ -219,17 +242,22 @@ def _render_markdown(rec: dict) -> str:
         f"- winner_size_gb: {rec['winner_size_gb']:.2f}",
         f"- pareto_frontier: "
         f"{sum(1 for r in rows if r['is_pareto'])}/{len(rows)}",
-        "",
     ]
+    if rec.get("reference_ppl_f16") is not None:
+        header_lines.append(
+            f"- reference_ppl_f16: {rec['reference_ppl_f16']:.4f}")
+    header_lines.append("")
     if not rows:
         header_lines.append("_(no candidates)_")
         return "\n".join(header_lines) + "\n"
     if overlay:
-        header_lines += [
-            "| priority | size_gb | ppl | pareto | winner | "
-            "pred_size_gb | pred_dppl | size_diff_gb |",
-            "|---|---:|---:|:---:|:---:|---:|---:|---:|",
-        ]
+        cols = ("| priority | size_gb | ppl | pareto | winner | "
+                "pred_size_gb | pred_dppl | size_diff_gb")
+        align = "|---|---:|---:|:---:|:---:|---:|---:|---:"
+        if has_ppl_diff:
+            cols += " | ppl_diff"
+            align += "|---:"
+        header_lines += [cols + " |", align + "|"]
     else:
         header_lines += [
             "| priority | size_gb | ppl | pareto | winner |",
@@ -248,6 +276,9 @@ def _render_markdown(rec: dict) -> str:
             row += (f" {pred_dppl:+.3f} |" if pred_dppl is not None
                     else " — |")
             row += (f" {diff:+.2f} |" if diff is not None else " — |")
+            if has_ppl_diff:
+                pd = r.get("ppl_diff")
+                row += (f" {pd:+.4f} |" if pd is not None else " — |")
         header_lines.append(row)
     return "\n".join(header_lines) + "\n"
 
@@ -260,6 +291,7 @@ def _write_csv(records: list[dict], out_path: Path) -> None:
     explore overlay attached."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     overlay = any(rec.get("has_explore_overlay") for rec in records)
+    has_ppl_diff = any(rec.get("has_ppl_diff") for rec in records)
     fieldnames = [
         "run", "summary_file", "budget_gb", "fisher",
         "user_priority", "winner_priority",
@@ -268,6 +300,8 @@ def _write_csv(records: list[dict], out_path: Path) -> None:
     ]
     if overlay:
         fieldnames += ["pred_size_gb", "pred_dppl", "size_diff_gb"]
+        if has_ppl_diff:
+            fieldnames += ["reference_ppl_f16", "ppl_diff"]
     with out_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -295,13 +329,20 @@ def _write_csv(records: list[dict], out_path: Path) -> None:
                     row["pred_size_gb"] = round(psg, 4) if psg is not None else ""
                     row["pred_dppl"] = round(pdp, 4) if pdp is not None else ""
                     row["size_diff_gb"] = round(sdg, 4) if sdg is not None else ""
+                    if has_ppl_diff:
+                        ref = rec.get("reference_ppl_f16")
+                        pd = cand.get("ppl_diff")
+                        row["reference_ppl_f16"] = (
+                            round(ref, 4) if ref is not None else "")
+                        row["ppl_diff"] = (
+                            round(pd, 4) if pd is not None else "")
                 w.writerow(row)
 
 
 def _write_json(records: list[dict], out_path: Path) -> None:
     """One aggregated JSON document covering every rendered summary."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = {"schema_version": 1, "frontiers": records}
+    doc = {"schema_version": 2, "frontiers": records}
     out_path.write_text(json.dumps(doc, indent=2) + "\n")
 
 

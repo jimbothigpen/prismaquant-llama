@@ -240,15 +240,22 @@ share the same in-memory shape and may be combined freely:
 - `--output-csv PATH` — one row per candidate; columns include `run,
   summary_file, budget_gb, fisher, user_priority, winner_priority,
   priority, size_gb, ppl, is_pareto, is_winner`.
-- `--output-json PATH` — aggregated `{schema_version: 1, frontiers:
+- `--output-json PATH` — aggregated `{schema_version: 2, frontiers:
   [...]}` document; each frontier carries `recipe` and `candidate_gguf`
-  paths.
+  paths. Bumped to 2 when the `ppl_diff` overlay column shipped (S11).
 - `--output-md PATH` — Markdown document with one section per summary.
+- `--from-explore PATH` — attach simulator-predicted size + ΔPPL from
+  a prior `explore` CSV alongside the measured Stage-K columns
+  (`pred_size_gb`, `pred_dppl`, `size_diff_gb`). When the Stage-K
+  summary also carries `reference_ppl_f16` (schema_version ≥ 3), an
+  additional `ppl_diff = measured_ppl − reference_ppl_f16 − pred_dppl`
+  column surfaces in text, Markdown, and CSV outputs.
 
-Stage K's `summary-PQ*.json` files also carry `schema_version: 1` at the
-top level (added 2026-05-17). Older summaries written before that date
-lack the key but parse identically — `show-frontier` reads them
-unchanged.
+Stage K's `summary-PQ*.json` files carry `schema_version: 3` at the
+top level. Schema history: v1 (≤ pre-2026-05-17) had no version key,
+v2 added the explicit field, v3 (S11) adds an optional
+`reference_ppl_f16` for use as the baseline in the `ppl_diff` overlay
+column. All older summaries parse unchanged.
 
 ### Universal flags
 
