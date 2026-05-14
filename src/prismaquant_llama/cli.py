@@ -20,8 +20,12 @@ Four subcommands:
         full `run`.
 
     prismaquant-llama show-frontier INPUT [--budget B] [--run LABEL]
+                                          [--output-csv P] [--output-json P]
+                                          [--output-md P]
         Render the Stage-K size/PPL frontier for a prior run (latest by
         default). Marks Pareto-frontier candidates and the chosen winner.
+        Additional `--output-*` flags emit machine-readable forms alongside
+        the stdout text table.
 
 Defaults come from ~/.prismaquant-llama/config.toml — auto-installed from
 the shipped default on first run. Edit by hand. CLI flags always win.

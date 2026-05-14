@@ -7,6 +7,11 @@ a sorted table with Pareto-frontier marks (`*`) and the winner mark
 (`★`), so users can see the size/quality curve, not just the picked
 recipe.
 
+The default output is a human-readable text table on stdout. Pass any of
+``--output-csv``, ``--output-json``, or ``--output-md`` (mirroring
+`explore`'s flags) to additionally emit machine-readable forms. Multiple
+output flags may be combined; stdout text is unchanged either way.
+
 Usage:
     prismaquant-llama show-frontier INPUT
         Print every summary found for INPUT's most recent run.
@@ -19,14 +24,20 @@ Usage:
 
     prismaquant-llama show-frontier INPUT --all-runs
         Print every run's summaries, not just the latest.
+
+    prismaquant-llama show-frontier INPUT --output-csv frontier.csv \\
+        --output-json frontier.json --output-md frontier.md
+        Also emit machine-readable forms alongside the stdout table.
 """
 
 from __future__ import annotations
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
 from typing import Optional
+
 
 from .config import load_config
 from .input_resolver import sanitize_model_name
@@ -45,36 +56,144 @@ def _find_run_dirs(layout_base: Path, model_name: str,
     return matches
 
 
-def _render_summary(summary_path: Path) -> str:
+def _summary_record(run_dir: Path, summary_path: Path) -> dict:
+    """Parse one summary-PQ*.json into the in-memory schema shared by all
+    rendering paths (text/MD/CSV/JSON)."""
     data = json.loads(summary_path.read_text())
     candidates = data.get("candidates", [])
-    if not candidates:
-        return f"== {summary_path.name} ==  (empty)\n"
-
-    # Sort by size for the curve view.
     rows = sorted(candidates, key=lambda r: r["size_gb"])
     winner_p = data.get("winner_priority")
+    fisher = summary_path.stem.endswith("-fisher")
+    return {
+        "run": run_dir.name,
+        "summary_file": summary_path.name,
+        "summary_path": str(summary_path),
+        "budget_gb": data.get("budget_gb"),
+        "user_priority": data.get("user_priority"),
+        "winner_priority": winner_p,
+        "winner_ppl": data.get("winner_ppl"),
+        "winner_size_gb": data.get("winner_size_gb"),
+        "fisher": fisher,
+        "candidates": [
+            {
+                "priority": r["priority"],
+                "size_gb": r["size_gb"],
+                "ppl": r["ppl"],
+                "is_pareto": bool(r.get("is_pareto")),
+                "is_winner": r["priority"] == winner_p,
+                "recipe": r.get("recipe"),
+                "candidate_gguf": r.get("candidate_gguf"),
+            }
+            for r in rows
+        ],
+    }
 
-    lines = []
-    lines.append(f"== {summary_path.name} ==")
-    lines.append(f"  path             : {summary_path}")
-    lines.append(f"  budget_gb        : {data.get('budget_gb'):.2f}")
-    lines.append(f"  user_priority    : {data.get('user_priority')}")
-    lines.append(f"  winner_priority  : {winner_p}")
-    lines.append(f"  winner_ppl       : {data.get('winner_ppl'):.4f}")
-    lines.append(f"  winner_size_gb   : {data.get('winner_size_gb'):.2f}")
-    n_pareto = sum(1 for r in rows if r.get("is_pareto"))
-    lines.append(f"  pareto_frontier  : {n_pareto}/{len(rows)}")
-    lines.append("")
-    lines.append(f"  {'priority':<10} {'size_gb':>9} {'ppl':>10}  "
-                 f"{'pareto':<7} {'winner':<6}")
+
+def _render_text(rec: dict) -> str:
+    rows = rec["candidates"]
+    if not rows:
+        return f"== {rec['summary_file']} ==  (empty)\n"
+    n_pareto = sum(1 for r in rows if r["is_pareto"])
+    lines = [
+        f"== {rec['summary_file']} ==",
+        f"  path             : {rec['summary_path']}",
+        f"  budget_gb        : {rec['budget_gb']:.2f}",
+        f"  user_priority    : {rec['user_priority']}",
+        f"  winner_priority  : {rec['winner_priority']}",
+        f"  winner_ppl       : {rec['winner_ppl']:.4f}",
+        f"  winner_size_gb   : {rec['winner_size_gb']:.2f}",
+        f"  pareto_frontier  : {n_pareto}/{len(rows)}",
+        "",
+        f"  {'priority':<10} {'size_gb':>9} {'ppl':>10}  "
+        f"{'pareto':<7} {'winner':<6}",
+    ]
     for r in rows:
-        pareto = "*" if r.get("is_pareto") else " "
-        winner = "★" if r["priority"] == winner_p else " "
+        pareto = "*" if r["is_pareto"] else " "
+        winner = "★" if r["is_winner"] else " "
         lines.append(f"  {r['priority']:<10} {r['size_gb']:>9.2f} "
                      f"{r['ppl']:>10.4f}  {pareto:<7} {winner:<6}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _render_markdown(rec: dict) -> str:
+    """Render one summary as a Markdown section + table."""
+    rows = rec["candidates"]
+    header_lines = [
+        f"### {rec['summary_file']}",
+        "",
+        f"- path: `{rec['summary_path']}`",
+        f"- budget_gb: {rec['budget_gb']:.2f}",
+        f"- user_priority: `{rec['user_priority']}`",
+        f"- winner_priority: `{rec['winner_priority']}`",
+        f"- winner_ppl: {rec['winner_ppl']:.4f}",
+        f"- winner_size_gb: {rec['winner_size_gb']:.2f}",
+        f"- pareto_frontier: "
+        f"{sum(1 for r in rows if r['is_pareto'])}/{len(rows)}",
+        "",
+    ]
+    if not rows:
+        header_lines.append("_(no candidates)_")
+        return "\n".join(header_lines) + "\n"
+    header_lines += [
+        "| priority | size_gb | ppl | pareto | winner |",
+        "|---|---:|---:|:---:|:---:|",
+    ]
+    for r in rows:
+        pareto = "*" if r["is_pareto"] else ""
+        winner = "★" if r["is_winner"] else ""
+        header_lines.append(
+            f"| `{r['priority']}` | {r['size_gb']:.2f} | {r['ppl']:.4f} "
+            f"| {pareto} | {winner} |"
+        )
+    return "\n".join(header_lines) + "\n"
+
+
+def _write_csv(records: list[dict], out_path: Path) -> None:
+    """One row per candidate, joined with its parent summary's metadata."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "run", "summary_file", "budget_gb", "fisher",
+        "user_priority", "winner_priority",
+        "priority", "size_gb", "ppl", "is_pareto", "is_winner",
+    ]
+    with out_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for rec in records:
+            for cand in rec["candidates"]:
+                w.writerow({
+                    "run": rec["run"],
+                    "summary_file": rec["summary_file"],
+                    "budget_gb": rec["budget_gb"],
+                    "fisher": rec["fisher"],
+                    "user_priority": rec["user_priority"],
+                    "winner_priority": rec["winner_priority"],
+                    "priority": cand["priority"],
+                    "size_gb": cand["size_gb"],
+                    "ppl": cand["ppl"],
+                    "is_pareto": cand["is_pareto"],
+                    "is_winner": cand["is_winner"],
+                })
+
+
+def _write_json(records: list[dict], out_path: Path) -> None:
+    """One aggregated JSON document covering every rendered summary."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema_version": 1, "frontiers": records}
+    out_path.write_text(json.dumps(doc, indent=2) + "\n")
+
+
+def _write_md(records: list[dict], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sections = []
+    last_run = None
+    for rec in records:
+        if rec["run"] != last_run:
+            sections.append(f"## run: {rec['run']}\n")
+            last_run = rec["run"]
+        sections.append(_render_markdown(rec))
+    out_path.write_text("\n".join(sections))
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -99,6 +218,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "default: latest run for the model")
     p.add_argument("--all-runs", action="store_true",
                    help="print frontiers for every run, not just the latest")
+    p.add_argument("--output-csv", type=Path, default=None,
+                   help="also write one-row-per-candidate CSV to this path")
+    p.add_argument("--output-json", type=Path, default=None,
+                   help="also write the aggregated frontier(s) as JSON")
+    p.add_argument("--output-md", type=Path, default=None,
+                   help="also write the frontier(s) as a Markdown document")
     args = p.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -120,24 +245,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         glob_pat = f"summary-PQ{args.budget}*.json"
 
-    n_found = 0
+    records: list[dict] = []
     for run_dir in runs:
         stage_k = run_dir / "stage-k"
         if not stage_k.exists():
             continue
         summaries = sorted(stage_k.glob(glob_pat))
-        if not summaries:
-            continue
-        print(f"# run: {run_dir.name}")
-        print()
         for s in summaries:
-            print(_render_summary(s))
-            n_found += 1
+            records.append(_summary_record(run_dir, s))
 
-    if n_found == 0:
+    if not records:
         print(f"show-frontier: no Stage-K summaries matched in "
               f"{[r.name for r in runs]} (glob={glob_pat})", file=sys.stderr)
         return 1
+
+    # Stdout: always text, grouped by run (preserves prior behaviour).
+    last_run = None
+    for rec in records:
+        if rec["run"] != last_run:
+            print(f"# run: {rec['run']}")
+            print()
+            last_run = rec["run"]
+        print(_render_text(rec))
+
+    if args.output_csv:
+        _write_csv(records, args.output_csv)
+        print(f"[show-frontier] wrote CSV → {args.output_csv}")
+    if args.output_json:
+        _write_json(records, args.output_json)
+        print(f"[show-frontier] wrote JSON → {args.output_json}")
+    if args.output_md:
+        _write_md(records, args.output_md)
+        print(f"[show-frontier] wrote Markdown → {args.output_md}")
+
     return 0
 
 
