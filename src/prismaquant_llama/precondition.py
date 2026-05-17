@@ -78,6 +78,9 @@ _BPW_FALLBACK = {
     "TQ3_4S": 3.0625, "TQ3_1S": 3.0,
     # MoE-only FP4 (mainline)
     "MXFP4_MOE": 4.25,
+    # NVIDIA NVFP4 (mainline GGML_TYPE_NVFP4): 64-elem block, 32B packed E2M1 +
+    # 4B of UE4M3 sub-block scales = 36B / 64 = 4.5 bpw exactly.
+    "NVFP4": 4.5,
 }
 
 

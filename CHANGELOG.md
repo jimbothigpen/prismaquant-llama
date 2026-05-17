@@ -9,6 +9,19 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-17 — NVFP4 added to `_BPW_FALLBACK`
+
+- `precondition._BPW_FALLBACK` gains `"NVFP4": 4.5` (NVIDIA NVFP4 / mainline
+  `GGML_TYPE_NVFP4` — 64-element block, 32B packed E2M1 + 4B UE4M3 sub-block
+  scales = 36 B / 64 = 4.5 bpw exactly). Allocator can now resolve a bpw for
+  NVFP4-assigned tensors without a measured costs.csv row (e.g. tensors
+  assigned by shape-propagation from exemplar layers); previously the lookup
+  fell off the end and the tensor was silently skipped as `skip:unknown`.
+- No other code changes; the upstream-yggdrasil quantize-cost binary already
+  accepts `--types NVFP4` (resolves via `ggml_type_name()` enumeration; no
+  hardcoded whitelist there) so costs.csv rows for NVFP4 populate normally
+  when requested.
+
 ### 2026-05-17 — `show-frontier` overlay v2: `ppl_diff` column (S11)
 
 - Stage K `summary-PQ*.json` schema bumped to `schema_version: 3`. New
