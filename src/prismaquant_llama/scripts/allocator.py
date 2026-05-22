@@ -799,6 +799,24 @@ def main():
               f"PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR=1 to switch)",
               flush=True)
 
+    # MTP forced-passthrough: if --mtp-format BF16, exclude MTP tensors from the
+    # DP budget so the solver isn't pricing weights it cannot reassign.
+    # GGUF-native predicate: name in mtp_names (blk.<N>.nextn.*), not startswith("mtp.").
+    mtp_names: set[str] = set()
+    forced_passthrough_assignment: dict[str, str] = {}
+    if args.mtp_tensors and args.mtp_format and args.mtp_format.upper() == "BF16":
+        with open(args.mtp_tensors) as f:
+            mtp_names = set(json.load(f))
+        forced_passthrough_assignment = {
+            name: args.mtp_format for name in mtp_names if name in costs
+        }
+        if forced_passthrough_assignment:
+            for name in forced_passthrough_assignment:
+                del costs[name]
+            print(f"[allocator] mtp forced-passthrough: excluded "
+                  f"{len(forced_passthrough_assignment)} BF16 MTP tensors from DP "
+                  f"budget", flush=True)
+
     norms = compute_norms(costs, fisher, tps, use_fisher=use_fisher)
     print(f"[allocator] cost norms (per-tensor mean): "
           f"PPL={norms[0]:.3e}  TG={norms[1]:.3e}  PP={norms[2]:.3e}", flush=True)
@@ -818,10 +836,16 @@ def main():
           flush=True)
 
     if args.mtp_tensors and args.mtp_format:
-        with open(args.mtp_tensors) as f:
-            mtp_names = set(json.load(f))
-        recipe, n_overridden = apply_mtp_format_override(recipe, mtp_names,
-                                                         args.mtp_format)
+        if forced_passthrough_assignment:
+            # BF16 path: pre-solve exclusion already done; merge forced assignments.
+            recipe.update(forced_passthrough_assignment)
+            n_overridden = len(forced_passthrough_assignment)
+        else:
+            if not mtp_names:
+                with open(args.mtp_tensors) as f:
+                    mtp_names = set(json.load(f))
+            recipe, n_overridden = apply_mtp_format_override(recipe, mtp_names,
+                                                             args.mtp_format)
         if n_overridden:
             # Post-override size accounting silently skips (tensor, format)
             # pairs that aren't in the costs CSV (the user's `quants` list
