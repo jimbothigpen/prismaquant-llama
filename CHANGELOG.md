@@ -9,6 +9,34 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-22 — Streaming-claim regression fix: `--no-mmap` now opt-in
+
+- **Fix:** Stages D (imatrix), I (final PPL), K-ref/K-cand (sweep PPL), and
+  calibration PPL no longer pass `--no-mmap` to `llama-imatrix` /
+  `llama-perplexity` by default. Previously all five sites hardcoded
+  `--no-mmap`, forcing the entire model into RAM before any computation
+  (O(model_size); ~1.3 TB for 671B BF16, ~336 GB for 671B @ 4 bpw). This
+  contradicted the documented streaming / bounded-RAM property and caused
+  OOM on any model that did not fit in available RAM.
+
+- **New config keys** in `[prismaquant-llama]` (both default `false`):
+  - `imatrix_eager_load = true` — restores `--no-mmap` for Stage D
+    (`llama-imatrix`). Use for small models that fit in RAM when
+    predictable imatrix timing matters.
+  - `ppl_eager_load = true` — restores `--no-mmap` for Stages I, K-ref,
+    K-cand, and calibration PPL (`llama-perplexity`). Same trade-off.
+
+- **Default behavior change:** with both flags `false` (new default),
+  `llama-imatrix` and `llama-perplexity` use OS-level mmap (`use_mmap=true`),
+  streaming model weights from disk on demand. Peak RAM is bounded by GPU
+  VRAM + KV cache + a small CPU buffer; total RAM no longer scales with
+  model file size. Runs become disk-I/O-bound (cephfs read bandwidth) rather
+  than RAM-bound.
+
+- **No other behavior changes.** Stages B, E, H, and glue stages were
+  already streaming-safe and are unaffected. (commits `2f0fb5c`, `b50fcf3`,
+  `a413950`)
+
 ### 2026-05-22 — MTP `forced_passthrough` budget exclusion
 
 - Allocator now excludes MTP tensors from the DP budget when `--mtp-format BF16`
