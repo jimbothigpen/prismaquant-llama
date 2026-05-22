@@ -135,12 +135,13 @@ def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path,
                         log_path: Path
                         ) -> tuple[Optional[float], Optional[float]]:
     bin_ = find_tool(cfg, "llama-perplexity")
-    rc, log = _run_cmd(
-        [str(bin_), "-m", str(gguf), "-f", str(corpus),
-         "-c", "2048", "-ngl", "99", "-fa", "on",
-         "-ctk", "f16", "-ctv", "f16",
-         "--chunks", str(cfg.ppl_chunks), "--no-mmap"],
-        subprocess_env(cfg), log_path)
+    calib_args = [str(bin_), "-m", str(gguf), "-f", str(corpus),
+                  "-c", "2048", "-ngl", "99", "-fa", "on",
+                  "-ctk", "f16", "-ctv", "f16",
+                  "--chunks", str(cfg.ppl_chunks)]
+    if cfg.ppl_eager_load:
+        calib_args.append("--no-mmap")
+    rc, log = _run_cmd(calib_args, subprocess_env(cfg), log_path)
     m = re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)", log)
     if not m:
         print(f"    WARN: no Final estimate (rc={rc}); last 5 log lines:")

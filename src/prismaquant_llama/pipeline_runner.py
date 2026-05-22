@@ -270,11 +270,14 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
         return cache
     imatrix_bin = find_tool(cfg, "llama-imatrix")
     _log(layout, "D", f"D. generating imatrix → {cache}")
-    rc = _run([str(imatrix_bin), "-m", str(bf16_path),
-               "-f", str(imatrix_corpus), "-o", str(cache),
-               "-c", str(ctx), "-ngl", "99", "--no-mmap",
-               "--chunks", str(cfg.imatrix_chunks),
-               "-ctk", "f16", "-ctv", "f16"],
+    imatrix_args = [str(imatrix_bin), "-m", str(bf16_path),
+                    "-f", str(imatrix_corpus), "-o", str(cache),
+                    "-c", str(ctx), "-ngl", "99"]
+    if cfg.imatrix_eager_load:
+        imatrix_args.append("--no-mmap")
+    imatrix_args += ["--chunks", str(cfg.imatrix_chunks),
+                     "-ctk", "f16", "-ctv", "f16"]
+    rc = _run(imatrix_args,
               layout.logs_dir / "stage-D.log",
               env=subprocess_env(cfg))
     if rc != 0 or not cache.exists():
@@ -597,12 +600,13 @@ def _stage_k_reference_ppl(cfg: Config, layout: Layout, bf16_path: Path,
     log = layout.logs_dir / "stage-K-ref-ppl-f16.log"
     _log(layout, "K",
          f"K. ref PPL (BF16) chunks={cfg.kl_ppl_chunks}")
-    rc = _run([str(perp_bin), "-m", str(bf16_path), "-f", str(ppl_corpus),
-               "-c", "4096", "-b", "2048",
-               "-ctk", "f16", "-ctv", "f16", "-fa", "on",
-               "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks),
-               "--no-mmap"],
-              log, env=subprocess_env(cfg))
+    kref_args = [str(perp_bin), "-m", str(bf16_path), "-f", str(ppl_corpus),
+                 "-c", "4096", "-b", "2048",
+                 "-ctk", "f16", "-ctv", "f16", "-fa", "on",
+                 "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks)]
+    if cfg.ppl_eager_load:
+        kref_args.append("--no-mmap")
+    rc = _run(kref_args, log, env=subprocess_env(cfg))
     import re as _re
     m = _re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)",
                    log.read_text())
@@ -744,13 +748,14 @@ def stage_k_validate(cfg: Config, layout: Layout,
         else:
             _log(layout, "K",
                  f"K. perplexity @ priority={p} chunks={cfg.kl_ppl_chunks}")
-            rc = _run([str(perp_bin), "-m", str(cand_gguf), "-f",
-                       str(ppl_corpus),
-                       "-c", "4096", "-b", "2048",
-                       "-ctk", "f16", "-ctv", "f16", "-fa", "on",
-                       "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks),
-                       "--no-mmap"],
-                      ppl_log, env=subprocess_env(cfg))
+            kcand_args = [str(perp_bin), "-m", str(cand_gguf), "-f",
+                          str(ppl_corpus),
+                          "-c", "4096", "-b", "2048",
+                          "-ctk", "f16", "-ctv", "f16", "-fa", "on",
+                          "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks)]
+            if cfg.ppl_eager_load:
+                kcand_args.append("--no-mmap")
+            rc = _run(kcand_args, ppl_log, env=subprocess_env(cfg))
             if rc != 0:
                 _log(layout, "K",
                      f"K. WARN: perplexity rc={rc} for priority={p}")
@@ -921,11 +926,13 @@ def stage_i_eval(cfg: Config, layout: Layout, gguf: Path,
     perp_bin = find_tool(cfg, "llama-perplexity")
     log = layout.logs_dir / "stage-I.log"
     _log(layout, "I", f"I. PPL eval @ chunks={cfg.ppl_chunks}")
-    rc = _run([str(perp_bin), "-m", str(gguf), "-f", str(ppl_corpus),
-               "-c", str(ctx), "-b", "2048",
-               "-ctk", "f16", "-ctv", "f16", "-fa", "on",
-               "-ngl", "99", "--chunks", str(cfg.ppl_chunks), "--no-mmap"],
-              log, env=subprocess_env(cfg))
+    stage_i_args = [str(perp_bin), "-m", str(gguf), "-f", str(ppl_corpus),
+                    "-c", str(ctx), "-b", "2048",
+                    "-ctk", "f16", "-ctv", "f16", "-fa", "on",
+                    "-ngl", "99", "--chunks", str(cfg.ppl_chunks)]
+    if cfg.ppl_eager_load:
+        stage_i_args.append("--no-mmap")
+    rc = _run(stage_i_args, log, env=subprocess_env(cfg))
     import re as _re
     text = log.read_text()
     m = _re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)", text)
