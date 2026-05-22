@@ -99,6 +99,15 @@ class Config:
                                                               "900"])
     kl_ppl_chunks: int = 20  # short chunks for sweep validation (S3 default)
 
+    # Memory-loading behavior for llama.cpp subprocess calls.
+    # Default False = streaming (mmap-backed, disk-bound; bounded RAM).
+    # Set to True to restore prior eager-load behavior (full model into RAM
+    # before any computation). Useful for small models that fit in RAM when
+    # predictable timing matters; OOMs on large models (>~15B at BF16 on a
+    # 30 GB host).
+    imatrix_eager_load: bool = False  # Stage D (llama-imatrix)
+    ppl_eager_load: bool = False      # Stages I, K-ref, K-cand, calibration
+
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -210,6 +219,9 @@ def load_config(config_path: Optional[Path] = None,
         raise ValueError(
             f"config 'kl_ppl_chunks' must be ≥ 1; got {kl_ppl_chunks}")
 
+    imatrix_eager_load = bool(section.get("imatrix_eager_load", False))
+    ppl_eager_load = bool(section.get("ppl_eager_load", False))
+
     # Stage F+ lives in its own top-level [precondition] table for room to
     # grow as P2-P5 add method-specific knobs (awq strategy, gptq damping,
     # halo seed, etc.). Missing table → defaults (mode=off, bpw_floor=4.0).
@@ -261,6 +273,8 @@ def load_config(config_path: Optional[Path] = None,
         kl_validate=kl_validate,
         kl_priorities=kl_priorities,
         kl_ppl_chunks=kl_ppl_chunks,
+        imatrix_eager_load=imatrix_eager_load,
+        ppl_eager_load=ppl_eager_load,
         config_path=config_path,
     )
 
