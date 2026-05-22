@@ -9,6 +9,19 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-22 — MTP `forced_passthrough` budget exclusion
+
+- Allocator now excludes MTP tensors from the DP budget when `--mtp-format BF16`
+  is configured (`scripts/allocator.py`, ~28 ins / 4 del). Port of upstream
+  `prismaquant` commit `6261632` (GGUF-native path). Prevents MTP layers from
+  consuming size quota budgeted for the main model body. (commit `a287266`)
+
+### 2026-05-22 — Fisher upstream-symbol regression smoke
+
+- New `tests/test_fisher_contract.py`: validates that the Fisher-related symbols
+  exported by the upstream `prismaquant` package remain importable under their
+  expected paths. Auto-skips when `prismaquant` is not installed. (commit `e69170c`)
+
 ### 2026-05-17 — NVFP4 added to `_BPW_FALLBACK`
 
 - `precondition._BPW_FALLBACK` gains `"NVFP4": 4.5` (NVIDIA NVFP4 / mainline
@@ -171,8 +184,8 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## Notes
 
-- Upstream `prismaquant` merge range `9b4dc69..f49d5af` is fully
-  reflected in the entries above. No new upstream commits past
-  `f49d5af` as of 2026-05-17.
+- Upstream `prismaquant` synced to `6261632` on 2026-05-22 (prior sync
+  stopped at `f49d5af`). The 2026-05-22 MTP budget-exclusion entry above
+  ports the `6261632` behavior to the GGUF-native allocator path.
 - Per-commit messages on `main` carry the granular reasoning behind
   each change.

@@ -41,7 +41,7 @@ K-quant at equal PPL, OR equal size at noticeably better PPL.
 
 1. **A llama.cpp build** with `llama-quantize`, `llama-imatrix`,
    `llama-perplexity`, `llama-bench`. Any modern fork works (mainline,
-   ik_llama, frankenturbo2). Either put them on `$PATH`, or set
+   ik_llama, jimbothigpen/llama.cpp). Either put them on `$PATH`, or set
    `path = "/your/llama/bin"` in the config (see below).
 
 2. **`llama-quantize-cost`** — Stage E needs a custom binary not in
@@ -61,7 +61,7 @@ K-quant at equal PPL, OR equal size at noticeably better PPL.
 
 3. **The `prismaquant` Python package** — Stage C (Hessian probe) shells
    out to `python3 -m prismaquant.incremental_probe`. Install our fork
-   (carries Gemma-4 + NemotronH patches):
+   (carries Gemma-3, Gemma-4 + NemotronH patches):
 
    ```bash
    pip install git+https://github.com/jimbothigpen/prismaquant.git
@@ -211,7 +211,7 @@ libs           = ""
 - `imatrix_chunks = 200` — production-grade imatrix (slower)
 - `ppl_chunks = 100` — tighter PPL stderr in eval
 
-**Adding fork-specific quants** (ik_llama, frankenturbo2, etc.) — just
+**Adding fork-specific quants** (ik_llama, jimbothigpen/llama.cpp, etc.) — just
 append to the `quants` list. The shipped default is mainline-only because
 that's the lowest-common-denominator. To see what your binary supports:
 
