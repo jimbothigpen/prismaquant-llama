@@ -199,7 +199,7 @@ prismaquant-llama run unsloth/gemma-3-4b-it --config ~/configs/ik-llama.toml
 base = "~/.prismaquant-llama/"
 
 # llama.cpp binary directory. Empty = discover via $PATH.
-# Override per-run: --path /opt/llama/build/bin
+# Override per-run: --path ~/llama.cpp/build/bin
 path = ""
 
 # Format whitelist — the allocator picks from this list only.
@@ -278,7 +278,7 @@ imatrix_chunks = 50
 convert_script = ""
 
 # Extra directory prepended to LD_LIBRARY_PATH for all subprocess calls.
-# Empty = no override. Override per-run: --libs /opt/llama/lib
+# Empty = no override. Override per-run: --libs ~/llama.cpp/build/lib
 libs = ""
 
 # ── Optional / advanced keys not shown in the shipped default ──────────────

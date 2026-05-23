@@ -51,13 +51,13 @@ base = "~/.prismaquant-llama/"
 #
 # Empty string ("") means "discover via $PATH" — the same way `llama-quantize`
 # resolves at the shell. Set to a specific directory if your binaries aren't
-# on $PATH, e.g. "/opt/llama/bin" or "/home/me/llama.cpp/build/bin".
+# on $PATH. Example: path = "~/llama.cpp/build/bin"
 #
 # `llama-quantize-cost` is a custom binary not in mainline llama.cpp; build
 # it from the source vendored at src/pipeline/cpp/quantize-cost/ and place
 # it next to llama-quantize. See the README for the recipe.
 #
-# Override per-run with `--path /opt/llama/bin`.
+# Override per-run with `--path ~/llama.cpp/build/bin` (or your own path).
 # ──────────────────────────────────────────────────────────────────────────────
 path = ""
 

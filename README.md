@@ -264,9 +264,9 @@ These work on both `run` and `calibrate`:
 - `--config /some/other.toml` uses an alternative config file. Useful for
   maintaining separate configs per fork (one mainline, one ik_llama, etc.) —
   point each config's `path` and `base` at the appropriate directories.
-- `--libs /opt/llama/lib` prepends a directory to `LD_LIBRARY_PATH` for
-  every subprocess call. Use when your llama.cpp libs aren't on the
-  system loader path.
+- `--libs` (**OPTIONAL**) prepends a directory to `LD_LIBRARY_PATH` for
+  every subprocess call. Use when your llama.cpp libraries aren't on the
+  system loader path. Example: `--libs ~/llama.cpp/build/lib`.
 - `--convert-script /path/to/convert_hf_to_gguf.py` overrides the
   convert-script location. Auto-discovery looks two levels up from
   `path` and next to the binary; set this if your install puts the

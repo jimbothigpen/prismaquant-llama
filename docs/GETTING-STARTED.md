@@ -401,13 +401,14 @@ independent caches and outputs.
 ### Library path issues
 
 If your llama.cpp binaries depend on `libllama.so` next to them but your
-loader doesn't see it:
+loader doesn't see it, use `--libs` to point to the library directory:
 
 ```bash
-prismaquant-llama run unsloth/gemma-3-4b-it --libs /opt/llama/lib
+prismaquant-llama run unsloth/gemma-3-4b-it --libs ~/llama.cpp/build/lib
 ```
 
-`--libs` is prepended to `LD_LIBRARY_PATH` for every subprocess call.
+Replace `~/llama.cpp/build/lib` with the directory containing your llama.cpp
+libraries. `--libs` is prepended to `LD_LIBRARY_PATH` for every subprocess call.
 
 ---
 
