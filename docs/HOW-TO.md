@@ -567,8 +567,8 @@ fmt[t] = argmin_f ( w_PPL · ĉ_ppl + w_TG · ĉ_tg + w_PP · ĉ_pp + λ · size
 ```
 
 per-tensor independently for each Lagrange multiplier λ, then bisects λ to find
-the value whose total size lands at or below the budget (±`--budget-band-gb`
-0.25 GB by default). ~50 bisection iterations; runtime is sub-second.
+the value whose total size lands at or below the budget (within a 0.25 GB
+tolerance band). ~50 bisection iterations; runtime is sub-second.
 
 The priority string XYZ maps to weights as: **X = PPL weight, Y = TG weight,
 Z = PP weight**. (Note: some earlier documentation inverted Y/Z; the code in
