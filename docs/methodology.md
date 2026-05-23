@@ -159,7 +159,7 @@ Where:
 
 - `PQ` = prismaquant prefix (distinguishes from Bartowski/standard quants)
 - `<budget>` = average target size in GB
-- `<XYZ>` = 3-digit priority code: `X` = PPL weight, `Y` = PP (prompt-processing) weight, `Z` = TG (token-generation) weight, each `0`–`9`. Higher digit = higher allocator priority. Common combinations: `522` (PPL-heavy), `900` (pure PPL), `333` (balanced), `252` (PP-favoring), `225` (TG-favoring). When a single weight is dominant (e.g. `009`, `090`, `900`), the allocator may collapse to the same recipe regardless of how the remaining zero-weights split.
+- `<XYZ>` = 3-digit priority code: `X` = PPL weight, `Y` = TG (token-generation) speed weight, `Z` = PP (prompt-processing) speed weight, each `0`–`9`. Higher digit = higher allocator priority. Common combinations: `522` (PPL-heavy), `900` (pure PPL), `333` (balanced), `252` (TG-favoring), `225` (PP-favoring). When a single weight is dominant (e.g. `009`, `090`, `900`), the allocator may collapse to the same recipe regardless of how the remaining zero-weights split.
 
 ---
 
