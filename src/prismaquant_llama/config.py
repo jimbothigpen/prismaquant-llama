@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .budget import BudgetSpec, budget_from_toml
+
 
 # Standard install location. Independent of `base`, since `base` lives
 # inside this file (chicken-and-egg).
@@ -49,7 +51,7 @@ class Config:
     base: Path
     path: Optional[Path]            # None ⇒ resolve via $PATH
     quants: list[str]
-    budget: int                     # percentage of BF16 size
+    budget_spec: BudgetSpec         # multi-unit budget (pct / bpw / GB)
     priority: str                   # 3-digit ratio
     ppl_corpus: str                 # "" / on-disk path / URL
     imatrix_corpus: str             # "" / on-disk path / URL
@@ -169,9 +171,16 @@ def load_config(config_path: Optional[Path] = None,
             "config 'quants' is empty. Set it to a non-empty list, e.g. "
             "['Q4_K', 'Q5_K', 'Q6_K', 'Q8_0', 'IQ4_XS'].")
 
-    budget = int(section.get("budget", 25))
-    if not (1 <= budget <= 100):
-        raise ValueError(f"config 'budget' must be in [1, 100]; got {budget}")
+    raw_budget = section.get("budget", 25)
+    try:
+        budget_spec = budget_from_toml(raw_budget)
+    except ValueError as e:
+        raise ValueError(f"config 'budget': {e}") from e
+    if budget_spec.form == "pct" and budget_spec.value > 100:
+        print(
+            f"[prismaquant-llama] WARNING: budget {budget_spec.value:.0f}% > 100 — "
+            f"this exceeds BF16 size (pseudo-upscaling). Proceeding.",
+            file=sys.stderr)
 
     priority = str(section.get("priority", "111"))
     _validate_priority(priority)
@@ -259,7 +268,7 @@ def load_config(config_path: Optional[Path] = None,
             libs_resolved = None
 
     return Config(
-        base=base, path=path, quants=quants, budget=budget,
+        base=base, path=path, quants=quants, budget_spec=budget_spec,
         priority=priority, ppl_corpus=ppl_corpus,
         imatrix_corpus=imatrix_corpus,
         ppl_chunks=ppl_chunks, imatrix_chunks=imatrix_chunks,

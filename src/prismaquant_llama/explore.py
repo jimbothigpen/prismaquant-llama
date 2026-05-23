@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .budget import BudgetSpec, parse_budget, check_mixed_units
 from .config import Config, load_config, subprocess_env, resolve_corpus
 from .input_resolver import resolve as resolve_input
 from .paths import Layout
@@ -123,8 +124,48 @@ def _prep_costs_for_allocator(raw_costs: dict, gguf_meta: dict, allow: set[str],
     return costs
 
 
+def _build_bpw_cache(budgets: list[BudgetSpec], raw_costs: dict,
+                     gguf_meta: dict, pinned: dict,
+                     bf16_gb: float) -> dict[float, float]:
+    """Compute budget_gb for each unique bpw value in ``budgets``.
+
+    The allocator domain size is computed after propagation so the bpw
+    denominator matches what bisect_lambda actually solves over.
+    """
+    sys.path.insert(0, str(_bundled_script_path("allocator.py").parent))
+    from allocator import (detect_layer_types, propagate_costs,
+                           auto_pick_exemplar_layers)
+
+    gguf_names = set(gguf_meta.keys())
+    layer_type = detect_layer_types(gguf_meta)
+    exemplars = auto_pick_exemplar_layers(layer_type)
+    costs, _ = propagate_costs(raw_costs, gguf_names, exemplars,
+                               layer_type=layer_type)
+
+    # Compute pinned fixed bytes and unpinned domain param count
+    pinned_bytes = 0
+    unpinned_params = 0
+    seen: set[str] = set()
+    for t, fmts in costs.items():
+        if t in pinned:
+            pf = pinned[t].upper()
+            if pf in fmts:
+                pinned_bytes += fmts[pf][1]
+        else:
+            if t not in seen:
+                seen.add(t)
+                unpinned_params += next(iter(fmts.values()))[2]
+
+    cache: dict[float, float] = {}
+    for bs in budgets:
+        if bs.form == "bpw" and bs.value not in cache:
+            target_bytes = pinned_bytes + int(bs.value * unpinned_params / 8)
+            cache[bs.value] = round(target_bytes / 1024**3, 3)
+    return cache
+
+
 def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
-                  budgets_pct: list[int], priorities: list[str],
+                  budgets: list[BudgetSpec], priorities: list[str],
                   out_csv: Optional[Path], out_md: Optional[Path],
                   assume_yes: bool) -> int:
     """Run A–F (cached if present), then sweep (budgets × priorities).
@@ -198,12 +239,24 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
 
     bf16_gb = bf16_path.stat().st_size / 1024**3
 
+    # Pre-compute bpw domain stats if any budget uses bpw form.
+    _bpw_domain_gb_cache: dict[float, float] = {}
+    if any(bs.form == "bpw" for bs in budgets):
+        _bpw_domain_gb_cache = _build_bpw_cache(
+            budgets, raw_costs, gguf_meta, pinned, bf16_gb)
+
     # Sweep
+    from collections import Counter
     rows = []
     for pri in priorities:
         weights = parse_priority(pri)
-        for bpct in budgets_pct:
-            budget_gb = round(bf16_gb * bpct / 100, 3)
+        for bspec in budgets:
+            if bspec.form == "pct":
+                budget_gb = round(bf16_gb * bspec.value / 100, 3)
+            elif bspec.form == "gb":
+                budget_gb = bspec.value
+            else:
+                budget_gb = _bpw_domain_gb_cache[bspec.value]
             budget_bytes = int(budget_gb * 1024**3)
 
             costs = _prep_costs_for_allocator({k: dict(v) for k, v in raw_costs.items()},
@@ -221,12 +274,12 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
 
             pred_dppl, pred_tg, pred_pp, _ = _predict_metrics(recipe, costs, perf)
 
-            from collections import Counter
             fmt_counts = Counter(recipe.values())
             top_fmts = ", ".join(f"{f}={c}" for f, c in
                                  sorted(fmt_counts.items(), key=lambda kv: -kv[1])[:4])
             rows.append({
-                "budget_pct": bpct,
+                "budget": bspec.original_input,
+                "budget_pct": int(bspec.value) if bspec.form == "pct" else 0,
                 "priority": pri,
                 "budget_GB": budget_gb,
                 "actual_GB": total_size / 1024**3,
@@ -246,7 +299,7 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
                 "|" + "|".join(["---"] * len(headers)) + "|"]
     for r in rows:
         md_lines.append("| {} | {} | {:.2f} | {:+.2f} | {:+.3f} | {:.2f} | {:.2f} | {} |".format(
-            f"{r['budget_pct']}%", r["priority"], r["actual_GB"], r["delta_GB"],
+            r["budget"], r["priority"], r["actual_GB"], r["delta_GB"],
             r["predicted_dppl"], r["predicted_tg"], r["predicted_pp"], r["top_formats"]))
     md_table = "\n".join(md_lines)
     print()
@@ -279,7 +332,11 @@ def add_explore_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--quants", default=None,
                    help="comma-separated allowed-quants list (default: from config)")
     p.add_argument("--budgets", default="22,25,28,32",
-                   help="comma-separated budget percentages to sweep "
+                   help="comma-separated budgets to sweep. All elements must "
+                        "use the same unit. Forms: '22,25,28,32' (percent of "
+                        "BF16), '3.5bpw,4.0bpw,4.5bpw' (bits per weight), "
+                        "'12GB,14GB,16GB' (absolute GB). "
+                        "Mixed units are rejected with an error. "
                         "(default: 22,25,28,32)")
     p.add_argument("--priorities", default="111,522,252,225,323",
                    help="comma-separated priority specs to sweep "
@@ -306,11 +363,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = pr.cfg_from_args(args)
     resolved = resolve_input(args.input, allow_gguf=False)
 
-    budgets = [int(x.strip()) for x in args.budgets.split(",") if x.strip()]
+    raw_budget_strs = [x.strip() for x in args.budgets.split(",") if x.strip()]
     priorities = [x.strip() for x in args.priorities.split(",") if x.strip()]
-    if not budgets or not priorities:
+    if not raw_budget_strs or not priorities:
         print("explore: --budgets and --priorities must each have ≥1 value",
               file=sys.stderr)
+        return 2
+
+    try:
+        budgets = [parse_budget(s) for s in raw_budget_strs]
+        check_mixed_units(budgets)
+    except ValueError as e:
+        print(f"explore: --budgets: {e}", file=sys.stderr)
         return 2
 
     try:

@@ -45,41 +45,69 @@ from pathlib import Path
 from typing import Optional
 
 
+from .budget import parse_budget
 from .config import load_config
 from .input_resolver import sanitize_model_name
 
 
-_SUMMARY_BUDGET_PCT_RE = re.compile(r"summary-PQ(\d+)")
+# Matches summary-PQ<label>.json and summary-PQ<label>-fisher.json.
+# <label> is alphanumeric only (p replaces . in filenames: 4p5bpw, 16gb, 25).
+_SUMMARY_LABEL_RE = re.compile(r"summary-(PQ[a-zA-Z0-9]+)")
 
 
-def _load_explore_overlay(path: Path) -> dict[tuple[int, str], dict]:
-    """Read an `explore` CSV into a lookup keyed by (budget_pct, priority).
+def _load_explore_overlay(path: Path) -> dict[tuple[str, str], dict]:
+    """Read an `explore` CSV into a lookup keyed by (budget_label, priority).
 
-    `explore` emits one row per (budget_pct, priority) cell with the
+    ``budget_label`` is the ``PQ<...>`` filename fragment derived from the
+    ``budget`` column (preferred) or from ``budget_pct`` as a back-compat
+    fallback for old CSVs produced before multi-unit support.
+
+    `explore` emits one row per (budget, priority) cell with the
     simulator-predicted size + ppl-delta + tg/pp. This map lets
     show-frontier attach predicted metrics to each measured candidate
     so users can compare simulator vs reality at a glance.
     """
-    out: dict[tuple[int, str], dict] = {}
+    out: dict[tuple[str, str], dict] = {}
     with path.open() as f:
         reader = csv.DictReader(f)
         for row in reader:
-            try:
-                bpct = int(row["budget_pct"])
-            except (KeyError, ValueError):
-                continue
             pri = row.get("priority")
             if pri is None:
                 continue
-            out[(bpct, pri)] = row
+            # Prefer the new `budget` column; fall back to `budget_pct` int.
+            budget_raw = row.get("budget")
+            if budget_raw:
+                try:
+                    label = parse_budget(budget_raw).filename_label
+                except ValueError:
+                    continue
+            else:
+                try:
+                    label = f"PQ{int(row['budget_pct'])}"
+                except (KeyError, ValueError):
+                    continue
+            out[(label, pri)] = row
     return out
 
 
-def _summary_budget_pct(summary_path: Path) -> Optional[int]:
-    m = _SUMMARY_BUDGET_PCT_RE.search(summary_path.name)
+def _summary_budget_label(summary_path: Path) -> Optional[str]:
+    """Extract the ``PQ<label>`` fragment from a summary filename, or None."""
+    m = _SUMMARY_LABEL_RE.search(summary_path.name)
     if m is None:
         return None
-    return int(m.group(1))
+    return m.group(1)  # e.g. "PQ25", "PQ4p5bpw", "PQ16gb"
+
+
+def _summary_budget_pct(summary_path: Path) -> Optional[int]:
+    """Legacy helper — returns the integer percentage when label is numeric-only."""
+    label = _summary_budget_label(summary_path)
+    if label is None:
+        return None
+    fragment = label[2:]  # strip "PQ"
+    try:
+        return int(fragment)
+    except ValueError:
+        return None
 
 
 def _find_run_dirs(layout_base: Path, model_name: str,
@@ -96,7 +124,7 @@ def _find_run_dirs(layout_base: Path, model_name: str,
 
 
 def _summary_record(run_dir: Path, summary_path: Path,
-                    explore_map: Optional[dict[tuple[int, str], dict]] = None
+                    explore_map: Optional[dict[tuple[str, str], dict]] = None
                     ) -> dict:
     """Parse one summary-PQ*.json into the in-memory schema shared by all
     rendering paths (text/MD/CSV/JSON). When ``explore_map`` is given,
@@ -108,7 +136,8 @@ def _summary_record(run_dir: Path, summary_path: Path,
     rows = sorted(candidates, key=lambda r: r["size_gb"])
     winner_p = data.get("winner_priority")
     fisher = summary_path.stem.endswith("-fisher")
-    budget_pct = _summary_budget_pct(summary_path)
+    budget_label = _summary_budget_label(summary_path)  # e.g. "PQ25", "PQ4p5bpw"
+    budget_pct = _summary_budget_pct(summary_path)      # int % for back-compat, or None
     # schema_version ≥ 3 may include a paired BF16 reference PPL; ppl_diff
     # = measured − reference − pred_dppl quantifies simulator vs reality.
     reference_ppl_f16 = data.get("reference_ppl_f16")
@@ -125,8 +154,8 @@ def _summary_record(run_dir: Path, summary_path: Path,
             "recipe_sha": r.get("recipe_sha"),
             "duplicate_of": r.get("duplicate_of"),
         }
-        if explore_map is not None and budget_pct is not None:
-            hit = explore_map.get((budget_pct, r["priority"]))
+        if explore_map is not None and budget_label is not None:
+            hit = explore_map.get((budget_label, r["priority"]))
             if hit is not None:
                 try:
                     pred_size = float(hit.get("actual_GB"))
@@ -156,7 +185,9 @@ def _summary_record(run_dir: Path, summary_path: Path,
         "summary_path": str(summary_path),
         "summary_schema_version": data.get("schema_version"),
         "budget_gb": data.get("budget_gb"),
-        "budget_pct": budget_pct,
+        "budget_input": data.get("budget_input"),  # original user spec, if recorded
+        "budget_label": budget_label,               # PQ<label> for filtering
+        "budget_pct": budget_pct,                   # int % for back-compat, or None
         "user_priority": data.get("user_priority"),
         "winner_priority": winner_p,
         "winner_ppl": data.get("winner_ppl"),
@@ -373,8 +404,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "~/.prismaquant-llama/config.toml)")
     p.add_argument("--base", type=Path, default=None,
                    help="override [prismaquant-llama].base for one invocation")
-    p.add_argument("--budget", type=int, default=None,
-                   help="restrict to one PQ budget (e.g. 25); default: all")
+    p.add_argument("--budget", type=str, default=None,
+                   help="restrict to one PQ budget (e.g. 25, 4.5bpw, 16GB); "
+                        "default: all")
     p.add_argument("--run", default=None,
                    help="exact run label (e.g. Qwen3.5-4B-20260515-103000); "
                         "default: latest run for the model")
@@ -397,7 +429,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = load_config(args.config)
     base = (args.base or cfg.base).expanduser().resolve()
 
-    explore_map: Optional[dict[tuple[int, str], dict]] = None
+    explore_map: Optional[dict[tuple[str, str], dict]] = None
     if args.from_explore is not None:
         if not args.from_explore.exists():
             print(f"show-frontier: --from-explore path not found: "
@@ -406,7 +438,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         explore_map = _load_explore_overlay(args.from_explore)
         if not explore_map:
             print(f"show-frontier: --from-explore CSV has no usable "
-                  f"(budget_pct, priority) rows: {args.from_explore}",
+                  f"(budget_label, priority) rows: {args.from_explore}",
                   file=sys.stderr)
             return 1
 
@@ -424,7 +456,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.budget is None:
         glob_pat = "summary-PQ*.json"
     else:
-        glob_pat = f"summary-PQ{args.budget}*.json"
+        try:
+            budget_label = parse_budget(args.budget).filename_label
+        except ValueError as e:
+            print(f"show-frontier: --budget: {e}", file=sys.stderr)
+            return 1
+        glob_pat = f"summary-{budget_label}*.json"
 
     records: list[dict] = []
     for run_dir in runs:

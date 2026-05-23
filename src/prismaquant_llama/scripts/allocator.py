@@ -620,6 +620,10 @@ def main():
     ap.add_argument("--bridge", required=True)
     ap.add_argument("--costs", required=True)
     ap.add_argument("--budget-gb", type=float, required=True)
+    ap.add_argument("--budget-input", default=None,
+                    help="Original user budget string (e.g. '4.5bpw', '25%%', "
+                         "'16GB'). Written to recipe.json as budget_input for "
+                         "traceability. Does not affect allocation math.")
     ap.add_argument("--pinned", default=None,
                     help="JSON {tensor_name: format} for hard-pinned tensors")
     ap.add_argument("--recipe-out", required=True)
@@ -884,19 +888,22 @@ def main():
         print(f"  {f:>12s}: {c}", flush=True)
 
     Path(args.recipe_out).parent.mkdir(parents=True, exist_ok=True)
+    recipe_doc = {
+        "recipe": recipe,
+        "budget_gb": args.budget_gb,
+        "actual_size_bytes": total_size,
+        "actual_size_gb": total_size / (1024**3),
+        "loss_surrogate": total_loss,
+        "lambda": lam,
+        "priority": args.priority,
+        "weights": {"ppl": weights[0], "tg": weights[1], "pp": weights[2]},
+        "format_counts": dict(fmt_counts),
+        "scoring": "fisher" if use_fisher else "weight",
+    }
+    if args.budget_input is not None:
+        recipe_doc["budget_input"] = args.budget_input
     with open(args.recipe_out, "w") as f:
-        json.dump({
-            "recipe": recipe,
-            "budget_gb": args.budget_gb,
-            "actual_size_bytes": total_size,
-            "actual_size_gb": total_size / (1024**3),
-            "loss_surrogate": total_loss,
-            "lambda": lam,
-            "priority": args.priority,
-            "weights": {"ppl": weights[0], "tg": weights[1], "pp": weights[2]},
-            "format_counts": dict(fmt_counts),
-            "scoring": "fisher" if use_fisher else "weight",
-        }, f, indent=2)
+        json.dump(recipe_doc, f, indent=2)
     print(f"[allocator] wrote recipe to {args.recipe_out}", flush=True)
 
     # Emit a text version that --tensor-type-file consumes directly.  Each

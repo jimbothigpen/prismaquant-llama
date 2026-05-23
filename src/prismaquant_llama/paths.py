@@ -104,9 +104,12 @@ class Layout:
         key = f"{bf16_sha[:12]}__{imatrix_sha[:12]}__{formats_hash[:8]}.costs.csv"
         return self.costs_cache / key
 
-    def gguf_output_path(self, model_name: str, budget_pct: int,
+    def gguf_output_path(self, model_name: str, budget_label: str,
                          priority: str) -> Path:
-        return self.ggufs / f"{model_name}-PQ{budget_pct}-{priority}.gguf"
+        """Return the output GGUF path. ``budget_label`` is the ``PQ<...>``
+        fragment from ``BudgetSpec.filename_label`` (e.g. 'PQ25', 'PQ4p5bpw',
+        'PQ16gb')."""
+        return self.ggufs / f"{model_name}-{budget_label}-{priority}.gguf"
 
     def preconditioned_bf16_path(self, model_name: str, ref_format: str) -> Path:
         """Stage F+'s preconditioned BF16 GGUF (one per model, shared across

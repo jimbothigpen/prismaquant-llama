@@ -13,6 +13,7 @@ import pytest
 
 import prismaquant_llama.pipeline_runner as pr
 import prismaquant_llama.calibration as cal
+from prismaquant_llama.budget import parse_budget
 from prismaquant_llama.config import Config
 from prismaquant_llama.paths import Layout
 
@@ -26,7 +27,7 @@ def _make_cfg(**overrides) -> Config:
         base=Path("/tmp/pq-test-unused"),
         path=None,
         quants=["Q4_K"],
-        budget=25,
+        budget_spec=parse_budget("25"),
         priority="111",
         ppl_corpus="",
         imatrix_corpus="",

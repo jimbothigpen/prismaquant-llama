@@ -165,19 +165,28 @@ fisher_output_mse = false
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# budget — target final GGUF size as a percentage of the BF16 GGUF size.
-# Reference points (approximate, model-dependent):
-#   - Q8_0    → ~50%
-#   - Q6_K    → ~38%
-#   - Q5_K_M  → ~33%
-#   - Q4_K_M  → ~28%
-#   - IQ4_XS  → ~27%
-#   - Q3_K_L  → ~22%
+# budget — target final GGUF size. Three input forms accepted:
 #
-# Default 25 sits slightly tighter than IQ4_XS — usable middle ground for
-# most production deployments.
+#   Integer / float (bare number or %):
+#     budget = 25     → 25% of BF16 GGUF size (default)
+#     budget = "25%"  → same
+#   Reference points for %-form (approximate, model-dependent):
+#     Q8_0    → ~50%   Q5_K_M  → ~33%   IQ4_XS  → ~27%
+#     Q6_K    → ~38%   Q4_K_M  → ~28%   Q3_K_L  → ~22%
 #
-# Override per-run with `--budget 30`.
+#   Bits-per-weight (average bpw over the unpinned allocator domain):
+#     budget = "4.5bpw"
+#     budget = "3bpw"
+#   Computed after costs.csv is available (Stage E).
+#
+#   Absolute gigabytes:
+#     budget = "16GB"
+#     budget = "22GB"
+#   Must be ≤ BF16 GGUF size; raises an error otherwise.
+#
+# The GGUF filename encodes the form: PQ25 (%), PQ4p5bpw (bpw), PQ16gb (GB).
+#
+# Override per-run with `--budget 30` or `--budget 4.5bpw` or `--budget 16GB`.
 # ──────────────────────────────────────────────────────────────────────────────
 budget = 25
 

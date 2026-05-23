@@ -9,6 +9,30 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-23 — Multi-unit `--budget` flag
+
+`--budget` (CLI) and `budget` (TOML) now accept three input forms, all
+converging on the existing internal `budget_gb` representation:
+
+- **`25` or `25%`** — percent of BF16 GGUF size (back-compat; bare integer
+  is still interpreted as %, not bpw or GB).
+- **`4.5bpw`, `3bpw`** — average bits-per-weight over the unpinned allocator
+  domain. Resolved after Stage E (costs.csv) using hard-pinned tensor sizes +
+  unpinned parameter count.
+- **`16GB`, `22GB`** — absolute gigabytes. Validated against BF16 GGUF size
+  immediately after Stage B; raises an error if the value exceeds the model
+  size.
+
+Output filename encodes the form: `PQ25` (%), `PQ4p5bpw` (bpw, `.`→`p`),
+`PQ16gb` (GB, lowercase). `recipe.json` gains a `budget_input` field recording
+the raw user string alongside the existing `budget_gb` canonical value.
+
+`explore --budgets` accepts the same forms but rejects mixed units in a
+single sweep (e.g. `25,4.5bpw` raises a clear error).
+
+`show-frontier --budget` now accepts any of the three forms and routes the
+value through `parse_budget()` to derive the glob pattern for summary files.
+
 ### 2026-05-22 — Streaming-claim regression fix: `--no-mmap` now opt-in
 
 - **Fix:** Stages D (imatrix), I (final PPL), K-ref/K-cand (sweep PPL), and

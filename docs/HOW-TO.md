@@ -238,8 +238,11 @@ mtp_format = "BF16"
 # PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR=1 is also set.
 fisher_output_mse = false
 
-# Target final GGUF size as % of the BF16 GGUF. 25 ≈ IQ4_XS territory.
-# Override per-run: --budget 30
+# Target final GGUF size. Three forms accepted:
+#   budget = 25         → 25% of BF16 GGUF (default)
+#   budget = "4.5bpw"  → average bpw over unpinned allocator domain
+#   budget = "16GB"     → absolute gigabytes
+# Override per-run: --budget 30  or  --budget 4.5bpw  or  --budget 16GB
 budget = 25
 
 # Three-digit PPL/TG/PP priority. Digits are PPL weight (X), TG weight (Y),
@@ -585,15 +588,19 @@ MTP tensors (when `mtp_tensors.json` is present) are pinned to `cfg.mtp_format`
 and excluded from the DP budget.
 
 Outputs:
-- `work/<run>/recipes/recipe-PQ<budget>-<priority>.json` — the allocation.
-- `work/<run>/recipes/recipe-PQ<budget>-<priority>.txt` — `tensor=format` lines
+- `work/<run>/recipes/recipe-PQ<label>-<priority>.json` — the allocation.
+- `work/<run>/recipes/recipe-PQ<label>-<priority>.txt` — `tensor=format` lines
   fed directly to `llama-quantize --tensor-type-file`.
+
+`<label>` encodes the budget form: `PQ25` (25%), `PQ4p5bpw` (4.5 bpw),
+`PQ16gb` (16 GB).
 
 **recipe.json schema:**
 
 ```json
 {
   "budget_gb": 2.45,
+  "budget_input": "4.5bpw",
   "actual_size_gb": 2.43,
   "loss_surrogate": 0.003412,
   "lambda": 1.23e-5,
@@ -636,7 +643,8 @@ plus the user's own priority), Stage K:
 5. Optionally runs one BF16 reference PPL pass (`_stage_k_reference_ppl`) for
    the `ppl_diff` overlay in `show-frontier`.
 
-Outputs: `work/<run>/stage-k/summary-PQ<budget>.json` (schema version 3).
+Outputs: `work/<run>/stage-k/summary-PQ<label>.json` (schema version 3),
+where `<label>` matches the budget form (`PQ25`, `PQ4p5bpw`, `PQ16gb`).
 
 The `show-frontier` subcommand re-renders these summaries without re-running
 anything.
@@ -692,7 +700,7 @@ if you need the number.
 | D | `<model-sha>__<corpus-sha>__c<N>.imatrix.gguf` | `_shared/imatrix-cache/` |
 | E | `<bf16-sha>__<imatrix-sha>__<fmt-hash>.csv` | `_shared/costs-cache/` |
 | F | `bridge.json` file existence | `work/<run>/` |
-| G | `recipe-PQ<B>-<P>.json` file existence | `work/<run>/recipes/` |
+| G | `recipe-PQ<label>-<P>.json` file existence | `work/<run>/recipes/` |
 | H | `<gguf>.cachekey.json` SHA match | `ggufs/` |
 
 Re-running with a different budget/priority (F and G invalidate): ~5–10 min.
@@ -715,16 +723,16 @@ associated with the model and start from scratch.
 │   ├── system.json                   from `calibrate system`
 │   └── models/<model>.json           from `calibrate model`
 ├── ggufs/
-│   └── <model>-PQ<budget>-<priority>.gguf    final output
+│   └── <model>-PQ<label>-<priority>.gguf    final output
 └── work/<model>-<timestamp>/         per-run scratch
     ├── costs/costs.csv               Stage E
     ├── bridge.json                   Stage F
     ├── mtp-tensors.json              Stage F (MTP models only)
     ├── recipes/
-    │   ├── recipe-PQ<B>-<P>.json     Stage G
-    │   └── recipe-PQ<B>-<P>.txt      Stage G (fed to llama-quantize)
+    │   ├── recipe-PQ<label>-<P>.json Stage G
+    │   └── recipe-PQ<label>-<P>.txt  Stage G (fed to llama-quantize)
     ├── stage-k/                      Stage K (when kl_validate=true)
-    │   └── summary-PQ<B>.json
+    │   └── summary-PQ<label>.json
     └── logs/                         all subprocess output
         ├── stage-A.log
         ├── stage-B.log
@@ -732,8 +740,9 @@ associated with the model and start from scratch.
         └── stage-I.log
 ```
 
-Filename convention: `<model>-PQ<budget>-<priority>.gguf`, e.g.
-`gemma-3-4b-it-PQ25-111.gguf` = 25% budget, equal-priority recipe.
+Filename convention: `<model>-PQ<label>-<priority>.gguf`, where `<label>`
+encodes the budget form — e.g. `PQ25` (25%), `PQ4p5bpw` (4.5 bpw),
+`PQ16gb` (16 GB). Example: `gemma-3-4b-it-PQ25-111.gguf`.
 
 ### 4.16 Purge
 
@@ -849,7 +858,7 @@ The starter config auto-install triggers on any invocation not using `--config`.
 | `--base DIR` | from config | Working directory |
 | `--path DIR` | from config | llama.cpp binary directory |
 | `--quants Q,...` | from config | Comma-separated format whitelist |
-| `--budget INT` | from config | Target size as % of BF16 |
+| `--budget SPEC` | from config | Target size: `25` or `25%` (% of BF16), `4.5bpw` (bpw), `16GB` (absolute) |
 | `--priority XYZ` | from config | 3-digit PPL/TG/PP ratio |
 | `--ppl-corpus PATH\|URL` | from config | PPL corpus (empty = bundled wikitext) |
 | `--imatrix-corpus PATH\|URL` | from config | imatrix corpus (empty = bundled bartowski-v5) |
@@ -908,7 +917,7 @@ prismaquant-llama explore INPUT [flags]
 | Flag | Default | Description |
 |---|---|---|
 | `INPUT` | *(required)* | HF id or on-disk safetensors directory |
-| `--budgets B,...` | `22,25,28,32` | Comma-separated budget percentages |
+| `--budgets SPEC,...` | `22,25,28,32` | Comma-separated budgets (all must use the same unit form) |
 | `--priorities P,...` | `111,522,252,225,323` | Comma-separated priority specs |
 | `--config PATH` | `~/.prismaquant-llama/config.toml` | Alternate config |
 | `--libs DIR` | (none) | Prepend to `LD_LIBRARY_PATH` |
@@ -936,13 +945,13 @@ prismaquant-llama show-frontier INPUT [flags]
 | `INPUT` | *(required)* | Model name, HF id, safetensors dir, or GGUF path |
 | `--config PATH` | `~/.prismaquant-llama/config.toml` | Alternate config |
 | `--base DIR` | from config | Base directory to search for `work/<run>/` |
-| `--budget INT` | (all) | Restrict to one PQ budget |
+| `--budget SPEC` | (all) | Restrict to one PQ budget (e.g. `25`, `4.5bpw`, `16GB`) |
 | `--run LABEL` | (latest) | Exact run label (e.g. `Qwen3.5-4B-20260515-103000`) |
 | `--all-runs` | false | Print every run, not just the latest |
 | `--output-csv PATH` | (none) | Write one-row-per-candidate CSV |
 | `--output-json PATH` | (none) | Write aggregated frontiers as JSON |
 | `--output-md PATH` | (none) | Write Markdown document |
-| `--from-explore PATH` | (none) | Attach explore CSV predictions (join on budget_pct + priority) |
+| `--from-explore PATH` | (none) | Attach explore CSV predictions (join on budget_label + priority) |
 
 ---
 
@@ -960,7 +969,7 @@ All keys have CLI flag overrides; see §7 for flag names.
 | `reference_format` | string | `"bf16"` | `"bf16"` or `"f16"`; controls Stage B outtype and calibration reference |
 | `mtp_format` | string | `"BF16"` | Format for MTP/NEXTN tensors; only active for MTP models |
 | `fisher_output_mse` | bool | `false` | Enable Fisher row-weighted output MSE path in Stage E |
-| `budget` | int | `25` | Target size as % of BF16; 1–100 |
+| `budget` | int or string | `25` | Target size: int/float → % of BF16; `"4.5bpw"` → bpw; `"16GB"` → absolute GB |
 | `priority` | string | `"111"` | 3-digit PPL/TG/PP weights (X=PPL, Y=TG, Z=PP) |
 | `ppl_corpus` | string | `""` | PPL corpus; empty = bundled wikitext-2-raw |
 | `imatrix_corpus` | string | `""` | imatrix corpus; empty = bundled bartowski-v5 |
@@ -1145,6 +1154,54 @@ prismaquant-llama show-frontier unsloth/gemma-3-4b-it \
     --from-explore sweep.csv
 ```
 
+### 9.7 Budget by bits-per-weight
+
+**Goal:** target a specific average bpw rather than a % of BF16.
+
+```bash
+prismaquant-llama run unsloth/gemma-3-4b-it \
+    --budget 4.5bpw \
+    --priority 111 \
+    --yes
+```
+
+The bpw budget is resolved after Stage E (costs.csv) using the allocator
+domain: `pinned_bytes + bpw × unpinned_params / 8`. Hard-pinned tensors
+(`output.weight` at Q6_K, `token_embd.weight` at Q8_0) count at their
+fixed sizes; only the remaining free tensors are summed. The resulting
+`budget_gb` is then used exactly like a GB-form budget.
+
+Output filename: `gemma-3-4b-it-PQ4p5bpw-111.gguf`.
+
+`explore` accepts bpw budgets too, but all budgets in one sweep must use
+the same unit form (mixed units raise a clear error):
+
+```bash
+prismaquant-llama explore unsloth/gemma-3-4b-it \
+    --budgets 3bpw,3.5bpw,4bpw,4.5bpw \
+    --priorities 111,522 \
+    --yes
+```
+
+### 9.8 Budget by absolute GB
+
+**Goal:** produce a GGUF that fits in exactly N GB (e.g. to fill a VRAM
+budget to the nearest round number).
+
+```bash
+prismaquant-llama run unsloth/gemma-3-4b-it \
+    --budget 4GB \
+    --priority 111 \
+    --yes
+```
+
+The GB value must be ≤ the BF16 GGUF size or the run aborts immediately
+after Stage B with a clear error message. The pipeline uses the exact GB
+value as `budget_gb`; bisection finds the λ whose recipe total lands at
+or below that target.
+
+Output filename: `gemma-3-4b-it-PQ4gb-111.gguf`.
+
 ---
 
 ## 10. Troubleshooting
@@ -1261,6 +1318,18 @@ rm -f ~/.prismaquant-llama/_shared/probe/act-cache/*.pt
 
 Then re-probe. Avoid probing two models with the same architecture simultaneously
 when they share the same `base` directory.
+
+### `explore` rejects `--budgets` with "mixed units"
+
+**Symptom:** `ValueError: mixed budget units: ...` when passing a
+comma-separated `--budgets` list to `explore`.
+
+**Cause:** `explore` requires all budgets in a single sweep to use the same
+unit form (all %, all bpw, or all GB). Mixing forms (e.g. `--budgets 25,4.5bpw`)
+is rejected because the Pareto surface across mixed units is not meaningful.
+
+**Fix:** Use a single unit form for all budgets in one sweep. Run separate
+sweeps (different `--output-csv` files) if you need to compare across unit forms.
 
 ### TOML parse failure — missing `[prismaquant-llama]` section
 

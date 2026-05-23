@@ -207,7 +207,7 @@ path           = ""
 quants         = ["Q3_K","Q4_K","Q5_K","Q6_K","Q8_0",
                   "IQ3_XXS","IQ3_XS","IQ3_S","IQ3_M",
                   "IQ4_XS","IQ4_NL","BF16"]
-budget         = 25
+budget         = 25          # also: "4.5bpw" or "16GB"
 priority       = "111"
 ppl_corpus     = ""
 imatrix_corpus = ""
@@ -422,7 +422,8 @@ prismaquant-llama run INPUT \
     [--base DIR]                 # working directory (default: from config)
     [--path DIR]                 # llama.cpp binary directory (default: $PATH)
     [--quants Q1,Q2,...]         # whitelist (default: from config)
-    [--budget INT]               # % of BF16 (default: from config)
+    [--budget SPEC]              # % of BF16, bpw, or GB (default: from config)
+                                 #   25 or 25% → % of BF16; 4.5bpw → bpw; 16GB → GB
     [--priority XYZ]             # PPL/TG/PP ratio (default: from config)
     [--ppl-corpus PATH|URL]      # default: bundled wikitext
     [--imatrix-corpus PATH|URL]  # default: bundled bartowski-v5

@@ -227,8 +227,8 @@ input does **not** need to still exist on disk; only the historical
 
 Filters:
 
-- `--budget N` — restrict to one PQ budget (matches summaries for that
-  budget across the run, including `-fisher` variants).
+- `--budget SPEC` — restrict to one PQ budget (e.g. `25`, `4.5bpw`, `16GB`);
+  matches summaries for that budget across the run, including `-fisher` variants.
 - `--run LABEL` — exact run label (e.g. `Qwen3.5-4B-20260515-103000`).
   Default: latest run for the model.
 - `--all-runs` — render every run for the model, not just the latest.
@@ -296,7 +296,7 @@ path           = ""                                # empty = $PATH
 quants         = ["Q3_K","Q4_K","Q5_K","Q6_K","Q8_0",
                   "IQ3_XXS","IQ3_XS","IQ3_S","IQ3_M",
                   "IQ4_XS","IQ4_NL","BF16"]
-budget         = 25                                # % of BF16
+budget         = 25                                # % of BF16; also "4.5bpw" or "16GB"
 priority       = "111"                             # PPL/TG/PP, each 0–9
 ppl_corpus     = ""                                # empty = bundled wikitext
 imatrix_corpus = ""                                # empty = bundled bartowski-v5
@@ -350,7 +350,9 @@ base/
 ```
 
 Filename convention for final outputs:
-`<model>-PQ<budget>-<priority>.gguf` — e.g., `gemma-3-4b-it-PQ25-111.gguf`.
+`<model>-PQ<label>-<priority>.gguf` — where `<label>` encodes the budget form:
+`PQ25` (25%), `PQ4p5bpw` (4.5 bpw), `PQ16gb` (16 GB).
+Example: `gemma-3-4b-it-PQ25-111.gguf`.
 
 ## `--purge` cleanup
 

@@ -152,13 +152,16 @@ Before trusting a run, sanity-check:
 Prismaquant GGUFs use the pattern:
 
 ```
-<base-model>-PQ<budget>-<XYZ>.gguf
+<base-model>-PQ<label>-<XYZ>.gguf
 ```
 
 Where:
 
 - `PQ` = prismaquant prefix (distinguishes from Bartowski/standard quants)
-- `<budget>` = average target size in GB
+- `<label>` = budget label encoding the input form:
+  - `PQ25` — 25% of BF16
+  - `PQ4p5bpw` — 4.5 bits-per-weight (`.` → `p` in filenames)
+  - `PQ16gb` — 16 GB absolute (lowercase `gb`)
 - `<XYZ>` = 3-digit priority code: `X` = PPL weight, `Y` = TG (token-generation) speed weight, `Z` = PP (prompt-processing) speed weight, each `0`–`9`. Higher digit = higher allocator priority. Common combinations: `522` (PPL-heavy), `900` (pure PPL), `333` (balanced), `252` (TG-favoring), `225` (PP-favoring). When a single weight is dominant (e.g. `009`, `090`, `900`), the allocator may collapse to the same recipe regardless of how the remaining zero-weights split.
 
 ---

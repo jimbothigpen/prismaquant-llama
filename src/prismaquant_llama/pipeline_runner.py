@@ -31,6 +31,7 @@ from dataclasses import dataclass, replace as _dc_replace
 from pathlib import Path
 from typing import Optional
 
+from .budget import BudgetSpec, parse_budget
 from .config import (Config, load_config, find_tool, subprocess_env,
                      resolve_corpus, LLAMA_TOOLS, VALID_PRECONDITION_MODES)
 from .input_resolver import ResolvedInput, resolve as resolve_input
@@ -505,7 +506,8 @@ def stage_g_allocate(cfg: Config, layout: Layout,
     # `fisher+` prefix scheme from S1; PRISMAQUANT_FISHER_OUTPUT_MSE_ALLOCATOR
     # is set below to make the bundled allocator switch scoring modes).
     suffix = "-fisher" if cfg.fisher_output_mse else ""
-    recipe = layout.recipes_dir / f"recipe-PQ{cfg.budget}-{cfg.priority}{suffix}.json"
+    blabel = cfg.budget_spec.filename_label
+    recipe = layout.recipes_dir / f"recipe-{blabel}-{cfg.priority}{suffix}.json"
     if recipe.exists():
         _log(layout, "G", f"G. recipe cached (skip)")
         return recipe
@@ -515,11 +517,14 @@ def stage_g_allocate(cfg: Config, layout: Layout,
         "output.weight": "Q6_K",
         "token_embd.weight": "Q8_0",
     }, indent=2))
-    _log(layout, "G", f"G. allocating @ {budget_gb:.2f} GB priority {cfg.priority}")
+    _log(layout, "G",
+         f"G. allocating @ {budget_gb:.3f} GB "
+         f"({cfg.budget_spec.display_str}) priority {cfg.priority}")
     cmd = [sys.executable, str(allocator),
            "--bridge", str(bridge_path),
            "--costs", str(costs_path),
            "--budget-gb", str(budget_gb),
+           "--budget-input", cfg.budget_spec.original_input,
            "--budget-band-gb", "0.25",
            "--pinned", str(pinned),
            "--priority", cfg.priority,
@@ -643,9 +648,10 @@ def stage_k_validate(cfg: Config, layout: Layout,
     correct measure for our pipeline.
     """
     suffix = "-fisher" if cfg.fisher_output_mse else ""
+    blabel = cfg.budget_spec.filename_label
     work = layout.work / "stage-k"
     work.mkdir(parents=True, exist_ok=True)
-    summary_path = work / f"summary-PQ{cfg.budget}{suffix}.json"
+    summary_path = work / f"summary-{blabel}{suffix}.json"
 
     # Build the sweep set: baseline priority + each priority in cfg.kl_priorities.
     # De-dup by priority string (preserve user order, baseline first).
@@ -670,7 +676,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
 
     for p in sweep_priorities:
         recipe_path = (layout.recipes_dir
-                       / f"recipe-PQ{cfg.budget}-{p}{suffix}.json")
+                       / f"recipe-{blabel}-{p}{suffix}.json")
         if p == cfg.priority and baseline_recipe.exists():
             recipe_path = baseline_recipe
         elif not recipe_path.exists():
@@ -686,6 +692,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
                    "--bridge", str(bridge_path),
                    "--costs", str(costs_path),
                    "--budget-gb", str(budget_gb),
+                   "--budget-input", cfg.budget_spec.original_input,
                    "--budget-band-gb", "0.25",
                    "--pinned", str(pinned),
                    "--priority", p,
@@ -729,7 +736,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
             continue
 
         recipe_txt = _h_materialize_recipe_txt(recipe_path)
-        cand_gguf = work / f"candidate-PQ{cfg.budget}-{p}{suffix}.gguf"
+        cand_gguf = work / f"candidate-{blabel}-{p}{suffix}.gguf"
 
         if not cand_gguf.exists():
             _log(layout, "K", f"K. quantize candidate @ priority={p}")
@@ -798,7 +805,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
 
     # Write validated-frontier recipe at a stable name so Stage H picks it up.
     validated = (layout.recipes_dir
-                 / f"recipe-PQ{cfg.budget}-{cfg.priority}{suffix}"
+                 / f"recipe-{blabel}-{cfg.priority}{suffix}"
                  f"-validated.json")
     src = Path(winner["recipe"])
     validated.write_text(src.read_text())
@@ -809,6 +816,7 @@ def stage_k_validate(cfg: Config, layout: Layout,
     summary_doc = {
         "schema_version": 3,
         "budget_gb": budget_gb,
+        "budget_input": cfg.budget_spec.original_input,
         "user_priority": cfg.priority,
         "winner_priority": winner["priority"],
         "winner_ppl": winner["ppl"],
@@ -875,7 +883,8 @@ def stage_h_quantize(cfg: Config, layout: Layout, bf16_path: Path,
     cachekey.json, so a precondition rerun against the same output filename
     correctly invalidates a stale baseline GGUF written by an earlier run.
     """
-    out = layout.gguf_output_path(model_name, cfg.budget, cfg.priority)
+    out = layout.gguf_output_path(model_name, cfg.budget_spec.filename_label,
+                                  cfg.priority)
     recipe_txt = _h_materialize_recipe_txt(recipe_path)
     sidecar = out.parent / (out.name + ".cachekey.json")
 
@@ -955,6 +964,46 @@ def _bundled_script(name: str) -> Path:
     if not p.exists():
         raise FileNotFoundError(f"bundled script missing: {p}")
     return p
+
+
+def _bpw_budget_gb(bpw: float, costs_path: Path, bf16_path: Path,
+                   pinned: dict[str, str]) -> float:
+    """Convert a bpw budget to GB using the allocator-domain parameter counts.
+
+    Loads costs.csv, propagates to peer tensors (same logic as Stage G), then:
+      budget_gb = (pinned_fixed_bytes + bpw × unpinned_params / 8) / 1024³
+
+    pinned_fixed_bytes: size_bytes of each pinned tensor at its pinned format.
+    unpinned_params:    sum of n_elements for all non-pinned domain tensors
+                        (after propagation so the count matches what allocator sees).
+    """
+    sys.path.insert(0, str(_bundled_script("allocator.py").parent))
+    from allocator import (load_costs, read_gguf_tensor_meta,
+                           detect_layer_types, propagate_costs,
+                           auto_pick_exemplar_layers)
+
+    raw_costs = load_costs(str(costs_path))
+    gguf_meta = read_gguf_tensor_meta(str(bf16_path))
+    gguf_names = set(gguf_meta.keys())
+    layer_type = detect_layer_types(gguf_meta)
+    exemplars = auto_pick_exemplar_layers(layer_type)
+    costs, _ = propagate_costs(raw_costs, gguf_names, exemplars,
+                               layer_type=layer_type)
+
+    pinned_bytes = 0
+    unpinned_params = 0
+    seen: set[str] = set()
+    for t, fmts in costs.items():
+        if t in pinned:
+            pf = pinned[t].upper()
+            if pf in fmts:
+                pinned_bytes += fmts[pf][1]
+        else:
+            if t not in seen:
+                seen.add(t)
+                unpinned_params += next(iter(fmts.values()))[2]
+
+    return (pinned_bytes + bpw * unpinned_params / 8) / 1024**3
 
 
 def _auto_pick_exemplars(bf16_path: Path) -> list[int]:
@@ -1066,7 +1115,7 @@ def _compose_run_with_calibrate(run_est: "Estimate",
         time_high_min=run_est.time_high_min + cal_est.time_high_min,
         source_cached=run_est.source_cached,
         bf16_cached=run_est.bf16_cached,
-        budget=run_est.budget,
+        budget_spec=run_est.budget_spec,
         priority=run_est.priority,
         chunks_imatrix=run_est.chunks_imatrix,
         chunks_ppl=run_est.chunks_ppl,
@@ -1110,7 +1159,7 @@ class Estimate:
     time_high_min: int = 0
     source_cached: bool = False
     bf16_cached: bool = False
-    budget: Optional[int] = None
+    budget_spec: Optional[BudgetSpec] = None
     priority: Optional[str] = None
     chunks_imatrix: int = 0
     chunks_ppl: int = 0
@@ -1178,7 +1227,16 @@ def estimate_run(cfg: Config, resolved: "ResolvedInput",
     bf16_cached = bf16_path.exists()
     bf16_size = (bf16_path.stat().st_size if bf16_cached
                  else int((src_size or 0) * 1.05) or None)
-    final_size = (int(bf16_size * cfg.budget / 100) if bf16_size else None)
+    if bf16_size:
+        bspec = cfg.budget_spec
+        if bspec.form == "pct":
+            final_size = int(bf16_size * bspec.value / 100)
+        elif bspec.form == "gb":
+            final_size = int(bspec.value * 1024**3)
+        else:  # bpw — GB unknown at estimate time; approximate as bpw/16 of BF16
+            final_size = int(bf16_size * bspec.value / 16)
+    else:
+        final_size = None
     peak = ((0 if src_cached else (src_size or 0))
             + (0 if bf16_cached else (bf16_size or 0))
             + (final_size or 0) + 50 * 1024**2)  # +50MB for probe/imatrix/costs/recipe
@@ -1191,7 +1249,7 @@ def estimate_run(cfg: Config, resolved: "ResolvedInput",
         peak=peak if peak > 0 else None, free_disk=free,
         time_low_min=low, time_high_min=high,
         source_cached=src_cached, bf16_cached=bf16_cached,
-        budget=cfg.budget, priority=cfg.priority,
+        budget_spec=cfg.budget_spec, priority=cfg.priority,
         chunks_imatrix=cfg.imatrix_chunks, chunks_ppl=cfg.ppl_chunks,
     )
 
@@ -1257,8 +1315,9 @@ def confirm_or_abort(est: Estimate, assume_yes: bool) -> bool:
     print()
     print("┌─ prismaquant-llama " + est.label
           + " ─ " + est.model_name + " " + "─" * 4)
-    if est.budget is not None:
-        print(f"│ Budget:    {est.budget}% of BF16    Priority: {est.priority}")
+    if est.budget_spec is not None:
+        print(f"│ Budget:    {est.budget_spec.display_str}"
+              f"    Priority: {est.priority}")
     print(f"│ Formats:   {est.n_formats}    "
           f"imatrix_chunks: {est.chunks_imatrix}    "
           f"ppl_chunks: {est.chunks_ppl}")
@@ -1456,8 +1515,23 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
     # B: convert to BF16
     bf16_path = convert_to_bf16(cfg, layout, safetensors_dir, resolved.model_name)
     bf16_gb = bf16_path.stat().st_size / 1024**3
-    budget_gb = round(bf16_gb * cfg.budget / 100, 3)
-    _log(layout, "B", f"B. budget = {cfg.budget}% × {bf16_gb:.2f} GB = {budget_gb:.2f} GB")
+    bspec = cfg.budget_spec
+    if bspec.form == "pct":
+        budget_gb = round(bf16_gb * bspec.value / 100, 3)
+        _log(layout, "B",
+             f"B. budget = {bspec.value:.0f}% × {bf16_gb:.2f} GB = {budget_gb:.3f} GB")
+    elif bspec.form == "gb":
+        budget_gb = bspec.value
+        if budget_gb > bf16_gb:
+            raise SystemExit(
+                f"ERROR: --budget {bspec.original_input} ({budget_gb:.2f} GB) exceeds "
+                f"the model's BF16 size ({bf16_gb:.2f} GB). "
+                f"Reduce the GB target or use a percentage.")
+        _log(layout, "B",
+             f"B. budget = {budget_gb:.3f} GB (absolute; BF16 = {bf16_gb:.2f} GB)")
+    else:
+        # bpw — deferred; computed after Stage E when domain params are known
+        budget_gb = None  # resolved below after costs.csv is ready
 
     # C: probe
     probe_path = stage_c_probe(cfg, layout, safetensors_dir, imatrix_corpus,
@@ -1479,6 +1553,21 @@ def run_pipeline(cfg: Config, resolved: ResolvedInput,
     costs_path = stage_e_costs(cfg, layout, bf16_path, imatrix_path,
                                 fisher_sidecar_dir=fisher_sidecar_dir)
     purge_ctx.costs_path = costs_path     # for --purge yes cleanup of shared cache
+
+    # Resolve bpw budget after costs.csv is available
+    if bspec.form == "bpw":
+        _PINNED = {"output.weight": "Q6_K", "token_embd.weight": "Q8_0"}
+        budget_gb = round(_bpw_budget_gb(bspec.value, costs_path, bf16_path,
+                                          _PINNED), 3)
+        _log(layout, "E",
+             f"E. budget = {bspec.value:g} bpw → {budget_gb:.3f} GB "
+             f"(over unpinned allocator domain; BF16 = {bf16_gb:.2f} GB)")
+        if budget_gb > bf16_gb:
+            raise SystemExit(
+                f"ERROR: --budget {bspec.original_input} resolves to "
+                f"{budget_gb:.2f} GB which exceeds the model's BF16 size "
+                f"({bf16_gb:.2f} GB). Reduce bpw or use a GB/% target.")
+
     bridge_path, mtp_tensors_path = stage_f_bridge(cfg, layout, probe_path,
                                                     safetensors_dir)
     perf_file = find_perf_file(layout, resolved.model_name)
@@ -1580,8 +1669,11 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                    help="llama.cpp binary directory (default: from config)")
     p.add_argument("--quants", default=None,
                    help="comma-separated allowed-quants list (default: from config)")
-    p.add_argument("--budget", type=int, default=None,
-                   help="target size as %% of BF16 (default: from config)")
+    p.add_argument("--budget", type=str, default=None,
+                   help="target size as: '25' or '25%%' (percent of BF16, "
+                        "back-compat), '4.5bpw' (avg bits/weight over "
+                        "allocator domain), or '16GB' (absolute). "
+                        "Default: from config.")
     p.add_argument("--priority", default=None,
                    help="3-digit XYZ ratio (default: from config)")
     p.add_argument("--ppl-corpus", default=None,
@@ -1647,7 +1739,14 @@ def cfg_from_args(args) -> Config:
     if args.quants is not None:
         cfg.quants = [q.strip().upper() for q in args.quants.split(",") if q.strip()]
     if getattr(args, "budget", None) is not None:
-        cfg.budget = args.budget
+        try:
+            cfg.budget_spec = parse_budget(args.budget)
+        except ValueError as e:
+            raise SystemExit(f"ERROR: --budget {args.budget!r}: {e}") from e
+        if cfg.budget_spec.form == "pct" and cfg.budget_spec.value > 100:
+            import sys as _sys
+            print(f"WARNING: --budget {args.budget!r} exceeds 100% of BF16 "
+                  f"(pseudo-upscaling). Proceeding.", file=_sys.stderr)
     if getattr(args, "priority", None) is not None:
         cfg.priority = args.priority
     if args.ppl_chunks is not None:
