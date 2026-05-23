@@ -97,7 +97,11 @@ pip install --user prismaquant-llama
 prismaquant-llama --help
 ```
 
-The CLI is two subcommands: `run` and `calibrate`. That's the whole tool.
+The CLI has four subcommands: `run`, `calibrate`, `explore`, and
+`show-frontier`. This tutorial covers `run` and `calibrate`. See
+[`docs/HOW-TO.md`](HOW-TO.md) for `explore` (sweep budgets × priorities
+without producing a GGUF) and `show-frontier` (display Pareto-frontier
+results from a prior run).
 
 The first time you invoke it, a starter config gets dropped at
 `~/.prismaquant-llama/config.toml` and you'll see:
@@ -108,6 +112,18 @@ The first time you invoke it, a starter config gets dropped at
 ```
 
 That file is heavily commented; open it and tune to taste.
+
+**Stage B runtime deps.** `run` shells out to `convert_hf_to_gguf.py` at
+Stage B. That script requires three packages not declared by prismaquant-llama
+itself — install them alongside:
+
+```bash
+pip install --user gguf sentencepiece protobuf
+```
+
+> Use the fork-vendored `gguf` (`pip install git+https://github.com/jimbothigpen/llama.cpp gguf-py`)
+> rather than the mainline PyPI `gguf` if your target model uses architectures
+> added by jimbothigpen/llama.cpp (Gemma-4, Eagle3, NemotronH, etc.).
 
 ---
 
@@ -418,6 +434,7 @@ prismaquant-llama run INPUT \
     [--yes | -y]                 # skip the pre-flight confirmation prompt
     [--calibrate]                # run `calibrate model` first (no-op if cached)
     [--calibrate-chunks N]       # override ppl_chunks for calibration only
+    [--force]                    # wipe all prior artifacts for this model and recompute from scratch
 ```
 
 ### Useful flags (calibrate subcommand)
@@ -437,6 +454,7 @@ prismaquant-llama calibrate {system|model} INPUT \
     [--convert-script PATH]      # convert_hf_to_gguf.py location (default: auto-discover)
     [--purge {yes,no}]           # default: yes
     [--yes | -y]                 # skip the pre-flight confirmation prompt
+    [--force]                    # wipe all prior artifacts for this model and recompute from scratch
 ```
 
 ### Pre-flight prompt
@@ -462,6 +480,10 @@ llama.cpp binary directory, or pass `--path /your/bin`.
 into your llama.cpp tree's `tools/` and build the target (see
 Prerequisites section).
 
+**Stage B crashes immediately** — missing `gguf`, `sentencepiece`, or
+`protobuf`. The preflight check reports which ones:
+`pip install --user gguf sentencepiece protobuf`
+
 **"prismaquant package not installed"** (Stage C) — `pip install
 git+https://github.com/jimbothigpen/prismaquant.git`.
 
@@ -485,6 +507,8 @@ ignore the Stage I error — your final GGUF is in `ggufs/`).
 
 ## Next steps
 
+- Read [`docs/HOW-TO.md`](HOW-TO.md) for the complete reference: all CLI
+  flags, all config keys, every pipeline stage, and worked examples.
 - Read [`docs/methodology.md`](methodology.md) for the math behind the
   allocator's surrogate scoring.
 - Read [`README.md`](../README.md) for the high-level reference.
