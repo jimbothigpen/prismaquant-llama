@@ -624,6 +624,13 @@ def main():
                     help="Original user budget string (e.g. '4.5bpw', '25%%', "
                          "'16GB'). Written to recipe.json as budget_input for "
                          "traceability. Does not affect allocation math.")
+    ap.add_argument("--target-bpw", type=float, default=None,
+                    help="Target bits-per-weight over the unpinned allocator "
+                         "domain. Written to recipe.json as target_bpw for "
+                         "post-hoc inspection. This is the bpw the filename "
+                         "label encodes; it differs from on-disk effective bpw "
+                         "(which includes pinned tensors at higher precision). "
+                         "Does not affect allocation math.")
     ap.add_argument("--pinned", default=None,
                     help="JSON {tensor_name: format} for hard-pinned tensors")
     ap.add_argument("--recipe-out", required=True)
@@ -902,6 +909,8 @@ def main():
     }
     if args.budget_input is not None:
         recipe_doc["budget_input"] = args.budget_input
+    if args.target_bpw is not None:
+        recipe_doc["target_bpw"] = args.target_bpw
     with open(args.recipe_out, "w") as f:
         json.dump(recipe_doc, f, indent=2)
     print(f"[allocator] wrote recipe to {args.recipe_out}", flush=True)

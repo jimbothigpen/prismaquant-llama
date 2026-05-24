@@ -32,6 +32,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .budget import format_bpw_label
+
 
 @dataclass
 class Layout:
@@ -104,12 +106,15 @@ class Layout:
         key = f"{bf16_sha[:12]}__{imatrix_sha[:12]}__{formats_hash[:8]}.costs.csv"
         return self.costs_cache / key
 
-    def gguf_output_path(self, model_name: str, budget_label: str,
+    def gguf_output_path(self, model_name: str, bpw: float,
                          priority: str) -> Path:
-        """Return the output GGUF path. ``budget_label`` is the ``PQ<...>``
-        fragment from ``BudgetSpec.filename_label`` (e.g. 'PQ25', 'PQ4p5bpw',
-        'PQ16gb')."""
-        return self.ggufs / f"{model_name}-{budget_label}-{priority}.gguf"
+        """Return the output GGUF path.
+
+        ``bpw`` is the target bits-per-weight over the unpinned allocator
+        domain (not the on-disk effective bpw).  The filename label is always
+        the canonical bpw form: ``PQ<format_bpw_label(bpw)>``.
+        """
+        return self.ggufs / f"{model_name}-PQ{format_bpw_label(bpw)}-{priority}.gguf"
 
     def preconditioned_bf16_path(self, model_name: str, ref_format: str) -> Path:
         """Stage F+'s preconditioned BF16 GGUF (one per model, shared across
