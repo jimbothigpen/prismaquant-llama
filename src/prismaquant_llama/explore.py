@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .budget import BudgetSpec, parse_budget, check_mixed_units
+from .budget import BudgetSpec, parse_budget, check_mixed_units, format_bpw_label
 from .config import Config, load_config, subprocess_env, resolve_corpus
 from .input_resolver import resolve as resolve_input
 from .paths import Layout
@@ -239,8 +239,32 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
 
     bf16_gb = bf16_path.stat().st_size / 1024**3
 
-    # Pre-compute bpw domain stats if any budget uses bpw form.
+    # Pre-compute bpw domain stats (pinned_bytes + unpinned_params) for
+    # target_bpw derivation for pct/gb forms, and for bpw budget_gb resolution.
     _bpw_domain_gb_cache: dict[float, float] = {}
+    _pinned_bytes: int = 0
+    _unpinned_params: int = 0
+    if any(bs.form == "bpw" for bs in budgets) or any(
+            bs.form != "bpw" for bs in budgets):
+        # Always precompute domain stats — needed for target_bpw on all forms.
+        sys.path.insert(0, str(_bundled_script_path("allocator.py").parent))
+        from allocator import (detect_layer_types, propagate_costs,
+                               auto_pick_exemplar_layers)
+        _dn = set(gguf_meta.keys())
+        _lt = detect_layer_types(gguf_meta)
+        _ex = auto_pick_exemplar_layers(_lt)
+        _pc, _ = propagate_costs({k: dict(v) for k, v in raw_costs.items()},
+                                  _dn, _ex, layer_type=_lt)
+        _seen_d: set[str] = set()
+        for _t, _fmts in _pc.items():
+            if _t in pinned:
+                _pf = pinned[_t].upper()
+                if _pf in _fmts:
+                    _pinned_bytes += _fmts[_pf][1]
+            else:
+                if _t not in _seen_d:
+                    _seen_d.add(_t)
+                    _unpinned_params += next(iter(_fmts.values()))[2]
     if any(bs.form == "bpw" for bs in budgets):
         _bpw_domain_gb_cache = _build_bpw_cache(
             budgets, raw_costs, gguf_meta, pinned, bf16_gb)
@@ -258,6 +282,14 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
             else:
                 budget_gb = _bpw_domain_gb_cache[bspec.value]
             budget_bytes = int(budget_gb * 1024**3)
+            # Derive target_bpw for v2 canonical filename label.
+            if bspec.form == "bpw":
+                target_bpw = bspec.value
+            elif _unpinned_params > 0:
+                target_bpw = (budget_bytes - _pinned_bytes) * 8 / _unpinned_params
+            else:
+                target_bpw = budget_gb * 8  # fallback: avoid division by zero
+            budget_label = f"PQ{format_bpw_label(target_bpw)}"
 
             costs = _prep_costs_for_allocator({k: dict(v) for k, v in raw_costs.items()},
                                                gguf_meta, allow, floor_rules)
@@ -279,6 +311,7 @@ def explore_sweep(cfg: Config, resolved, imatrix_override: Optional[str],
                                  sorted(fmt_counts.items(), key=lambda kv: -kv[1])[:4])
             rows.append({
                 "budget": bspec.original_input,
+                "budget_label": budget_label,
                 "budget_pct": int(bspec.value) if bspec.form == "pct" else 0,
                 "priority": pri,
                 "budget_GB": budget_gb,

@@ -32,7 +32,7 @@ Usage:
     prismaquant-llama show-frontier INPUT --from-explore explore.csv
         Attach simulator-predicted size + ΔPPL from a prior `explore`
         CSV alongside the measured Stage-K columns. Join key is
-        (budget_pct from `summary-PQ{N}` filename, priority).
+        (budget_label from explore CSV, priority).
 """
 
 from __future__ import annotations
@@ -50,17 +50,18 @@ from .config import load_config
 from .input_resolver import sanitize_model_name
 
 
-# Matches summary-PQ<label>.json and summary-PQ<label>-fisher.json.
-# <label> is alphanumeric only (p replaces . in filenames: 4p5bpw, 16gb, 25).
-_SUMMARY_LABEL_RE = re.compile(r"summary-(PQ[a-zA-Z0-9]+)")
+# Matches summary-PQ<bpw>.json and summary-PQ<bpw>-fisher.json.
+# v2 filenames use the canonical bpw label: PQ4.5, PQ3.47, PQ4, etc.
+_SUMMARY_LABEL_RE = re.compile(r"summary-(PQ\d+(?:\.\d+)?)")
 
 
 def _load_explore_overlay(path: Path) -> dict[tuple[str, str], dict]:
     """Read an `explore` CSV into a lookup keyed by (budget_label, priority).
 
-    ``budget_label`` is the ``PQ<...>`` filename fragment derived from the
-    ``budget`` column (preferred) or from ``budget_pct`` as a back-compat
-    fallback for old CSVs produced before multi-unit support.
+    ``budget_label`` is read from the ``budget_label`` column (v2 canonical
+    bpw label, e.g. ``PQ4.5``) when present, falling back to deriving it
+    from the ``budget`` column via ``parse_budget().filename_label`` for bpw
+    form, or from ``budget_pct`` for old pre-v2 CSVs.
 
     `explore` emits one row per (budget, priority) cell with the
     simulator-predicted size + ppl-delta + tg/pp. This map lets
@@ -74,7 +75,12 @@ def _load_explore_overlay(path: Path) -> dict[tuple[str, str], dict]:
             pri = row.get("priority")
             if pri is None:
                 continue
-            # Prefer the new `budget` column; fall back to `budget_pct` int.
+            # v2: prefer the `budget_label` column (canonical bpw label)
+            label = row.get("budget_label")
+            if label:
+                out[(label, pri)] = row
+                continue
+            # Fall back: derive from `budget` raw string
             budget_raw = row.get("budget")
             if budget_raw:
                 try:
@@ -95,7 +101,7 @@ def _summary_budget_label(summary_path: Path) -> Optional[str]:
     m = _SUMMARY_LABEL_RE.search(summary_path.name)
     if m is None:
         return None
-    return m.group(1)  # e.g. "PQ25", "PQ4p5bpw", "PQ16gb"
+    return m.group(1)  # e.g. "PQ4.5", "PQ3.47", "PQ4"
 
 
 def _summary_budget_pct(summary_path: Path) -> Optional[int]:
