@@ -9,6 +9,44 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-24 — bpw-canonical GGUF output filenames (v2 filename scheme)
+
+The GGUF output filename now always encodes the **target bits-per-weight** over
+the unpinned allocator domain, regardless of `--budget` input form.
+
+**v1 (replaced):** `PQ25` (25%), `PQ4p5bpw` (4.5 bpw, `.`→`p`), `PQ16gb` (16 GB).  
+**v2 (current):** `PQ4.5` (bpw form; exact), `PQ4.85` (% form — bpw derived after
+Stage E), `PQ5.2` (GB form — bpw derived after Stage E). Formatted as 2 decimal
+places with trailing zeros stripped: `4.0` → `PQ4`, `4.50` → `PQ4.5`.
+
+Changes:
+
+- `budget.format_bpw_label(bpw)` — new public helper implementing the canonical
+  formatter: `f"{bpw:.2f}".rstrip("0").rstrip(".")`.
+- `BudgetSpec.filename_label` — `bpw` form now returns `PQ{format_bpw_label(value)}`.
+  `pct` and `gb` forms retain v1-style labels (`PQ25`, `PQ16gb`) for
+  `show-frontier --budget` glob-filtering only; they no longer appear in
+  pipeline output filenames.
+- `paths.gguf_output_path(model, bpw, priority)` — signature changed from
+  `budget_label: str` to `bpw: float`; always builds `PQ{format_bpw_label(bpw)}`.
+- `pipeline_runner._compute_target_bpw_from_gb()` — new helper; inverts
+  `_bpw_budget_gb` to derive target bpw from `budget_gb` after costs.csv is known.
+  Used for `pct` and `gb` input forms (Stage E deferred).
+- `stage_g_allocate`, `stage_k_validate`, `stage_h_quantize` — accept
+  `target_bpw: float`; use `format_bpw_label` to build the `PQ<bpw>` recipe/output label.
+- `allocator.py` gains `--target-bpw` argument; writes `target_bpw` into `recipe.json`
+  alongside the existing `budget_gb` and `budget_input` fields.
+- `explore.py` — computes `target_bpw` per cell; adds `budget_label` column
+  (`PQ<bpw>`) to the output CSV for the `show-frontier --from-explore` overlay join.
+- `show_frontier._SUMMARY_LABEL_RE` — updated from `PQ[a-zA-Z0-9]+` to
+  `PQ\d+(?:\.\d+)?` (matches `PQ4.5`, `PQ3.47`, `PQ4`; rejects v1-style labels).
+- `show_frontier._load_explore_overlay()` — prefers `budget_label` column when
+  present; falls back to deriving the label from `budget` or `budget_pct`.
+
+This is a **clean break from v1**: v1 filenames (`PQ4p5bpw`, `PQ25`, `PQ16gb`)
+are no longer produced. Existing v1 `summary-PQ*.json` files will not match the
+updated `_SUMMARY_LABEL_RE`; rename or re-run to regenerate with v2 labels.
+
 ### 2026-05-23 — Multi-unit `--budget` flag
 
 `--budget` (CLI) and `budget` (TOML) now accept three input forms, all

@@ -588,12 +588,13 @@ MTP tensors (when `mtp_tensors.json` is present) are pinned to `cfg.mtp_format`
 and excluded from the DP budget.
 
 Outputs:
-- `work/<run>/recipes/recipe-PQ<label>-<priority>.json` — the allocation.
-- `work/<run>/recipes/recipe-PQ<label>-<priority>.txt` — `tensor=format` lines
+- `work/<run>/recipes/recipe-PQ<bpw>-<priority>.json` — the allocation.
+- `work/<run>/recipes/recipe-PQ<bpw>-<priority>.txt` — `tensor=format` lines
   fed directly to `llama-quantize --tensor-type-file`.
 
-`<label>` encodes the budget form: `PQ25` (25%), `PQ4p5bpw` (4.5 bpw),
-`PQ16gb` (16 GB).
+`<bpw>` is the target bits-per-weight (2 decimals, trailing zeros stripped):
+e.g. `PQ4.5` (from `--budget 4.5bpw`), `PQ4.85` (from `--budget 25`,
+derived from model domain parameters after Stage E).
 
 **recipe.json schema:**
 
@@ -601,6 +602,7 @@ Outputs:
 {
   "budget_gb": 2.45,
   "budget_input": "4.5bpw",
+  "target_bpw": 4.5,
   "actual_size_gb": 2.43,
   "loss_surrogate": 0.003412,
   "lambda": 1.23e-5,
@@ -643,8 +645,8 @@ plus the user's own priority), Stage K:
 5. Optionally runs one BF16 reference PPL pass (`_stage_k_reference_ppl`) for
    the `ppl_diff` overlay in `show-frontier`.
 
-Outputs: `work/<run>/stage-k/summary-PQ<label>.json` (schema version 3),
-where `<label>` matches the budget form (`PQ25`, `PQ4p5bpw`, `PQ16gb`).
+Outputs: `work/<run>/stage-k/summary-PQ<bpw>.json` (schema version 3),
+where `<bpw>` is the canonical target bpw (e.g. `PQ4.5`, `PQ4.85`).
 
 The `show-frontier` subcommand re-renders these summaries without re-running
 anything.
@@ -674,7 +676,7 @@ Cache key: a sidecar `<gguf>.cachekey.json` recording SHA-256 of the BF16 GGUF,
 imatrix, and recipe.txt. Cache hits skip quantize entirely. Mismatches (e.g.
 after a pre-conditioning re-run or a llama.cpp bugfix) trigger a rebuild.
 
-Output: `ggufs/<model>-PQ<budget>-<priority>.gguf`.
+Output: `ggufs/<model>-PQ<bpw>-<priority>.gguf`.
 
 ### 4.13 Stage I — final PPL eval
 
@@ -700,7 +702,7 @@ if you need the number.
 | D | `<model-sha>__<corpus-sha>__c<N>.imatrix.gguf` | `_shared/imatrix-cache/` |
 | E | `<bf16-sha>__<imatrix-sha>__<fmt-hash>.csv` | `_shared/costs-cache/` |
 | F | `bridge.json` file existence | `work/<run>/` |
-| G | `recipe-PQ<label>-<P>.json` file existence | `work/<run>/recipes/` |
+| G | `recipe-PQ<bpw>-<P>.json` file existence | `work/<run>/recipes/` |
 | H | `<gguf>.cachekey.json` SHA match | `ggufs/` |
 
 Re-running with a different budget/priority (F and G invalidate): ~5–10 min.
@@ -723,16 +725,16 @@ associated with the model and start from scratch.
 │   ├── system.json                   from `calibrate system`
 │   └── models/<model>.json           from `calibrate model`
 ├── ggufs/
-│   └── <model>-PQ<label>-<priority>.gguf    final output
+│   └── <model>-PQ<bpw>-<priority>.gguf      final output
 └── work/<model>-<timestamp>/         per-run scratch
     ├── costs/costs.csv               Stage E
     ├── bridge.json                   Stage F
     ├── mtp-tensors.json              Stage F (MTP models only)
     ├── recipes/
-    │   ├── recipe-PQ<label>-<P>.json Stage G
-    │   └── recipe-PQ<label>-<P>.txt  Stage G (fed to llama-quantize)
+    │   ├── recipe-PQ<bpw>-<P>.json   Stage G
+    │   └── recipe-PQ<bpw>-<P>.txt    Stage G (fed to llama-quantize)
     ├── stage-k/                      Stage K (when kl_validate=true)
-    │   └── summary-PQ<label>.json
+    │   └── summary-PQ<bpw>.json
     └── logs/                         all subprocess output
         ├── stage-A.log
         ├── stage-B.log
@@ -740,9 +742,11 @@ associated with the model and start from scratch.
         └── stage-I.log
 ```
 
-Filename convention: `<model>-PQ<label>-<priority>.gguf`, where `<label>`
-encodes the budget form — e.g. `PQ25` (25%), `PQ4p5bpw` (4.5 bpw),
-`PQ16gb` (16 GB). Example: `gemma-3-4b-it-PQ25-111.gguf`.
+Filename convention: `<model>-PQ<bpw>-<priority>.gguf`, where `<bpw>` is the
+target bits-per-weight over the unpinned allocator domain (2 decimal places,
+trailing zeros stripped). For `--budget 4.5bpw` the label is `PQ4.5` exactly;
+for `--budget 25` or `--budget 16GB` the bpw is derived after Stage E.
+Example: `gemma-3-4b-it-PQ4.85-111.gguf` (from `--budget 25`).
 
 ### 4.16 Purge
 
@@ -794,7 +798,7 @@ simulator predictions against measured Stage-K values.
 
 ## 6. show-frontier — display Stage-K results
 
-Stage K writes one `summary-PQ<budget>.json` per run (when `kl_validate =
+Stage K writes one `summary-PQ<bpw>.json` per run (when `kl_validate =
 true`). `show-frontier` re-renders these summaries without re-running anything:
 
 ```bash
@@ -1171,7 +1175,7 @@ domain: `pinned_bytes + bpw × unpinned_params / 8`. Hard-pinned tensors
 fixed sizes; only the remaining free tensors are summed. The resulting
 `budget_gb` is then used exactly like a GB-form budget.
 
-Output filename: `gemma-3-4b-it-PQ4p5bpw-111.gguf`.
+Output filename: `gemma-3-4b-it-PQ4.5-111.gguf`.
 
 `explore` accepts bpw budgets too, but all budgets in one sweep must use
 the same unit form (mixed units raise a clear error):
@@ -1200,7 +1204,8 @@ after Stage B with a clear error message. The pipeline uses the exact GB
 value as `budget_gb`; bisection finds the λ whose recipe total lands at
 or below that target.
 
-Output filename: `gemma-3-4b-it-PQ4gb-111.gguf`.
+Output filename: e.g. `gemma-3-4b-it-PQ4.48-111.gguf` (exact bpw derived
+from the 4 GB budget and model domain parameters after Stage E).
 
 ---
 

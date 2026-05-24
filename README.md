@@ -204,7 +204,7 @@ recipes, which would be invisible from the cost CSV alone.
 ### `show-frontier` — re-display Stage K results
 
 If you enable Stage K (set `kl_validate = true` in `config.toml`), each
-`run` writes a `summary-PQ<budget>{,-fisher}.json` to its per-run
+`run` writes a `summary-PQ<bpw>{,-fisher}.json` to its per-run
 `work/<run>/stage-k/` directory. The summary records every priority the
 validator quantized + measured, with `is_pareto: bool` annotations and
 the chosen winner.
@@ -350,9 +350,11 @@ base/
 ```
 
 Filename convention for final outputs:
-`<model>-PQ<label>-<priority>.gguf` — where `<label>` encodes the budget form:
-`PQ25` (25%), `PQ4p5bpw` (4.5 bpw), `PQ16gb` (16 GB).
-Example: `gemma-3-4b-it-PQ25-111.gguf`.
+`<model>-PQ<bpw>-<priority>.gguf` — where `<bpw>` is the target bits-per-weight
+over the unpinned allocator domain (2 decimals, trailing zeros stripped):
+`PQ4.5` (from `--budget 4.5bpw`, exact), `PQ4.85` (from `--budget 25%` or
+`--budget 16GB`, derived after Stage E from model domain parameters).
+Example: `gemma-3-4b-it-PQ4.5-111.gguf`.
 
 ## `--purge` cleanup
 

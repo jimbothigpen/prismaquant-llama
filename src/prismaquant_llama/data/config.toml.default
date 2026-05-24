@@ -184,7 +184,8 @@ fisher_output_mse = false
 #     budget = "22GB"
 #   Must be ≤ BF16 GGUF size; raises an error otherwise.
 #
-# The GGUF filename encodes the form: PQ25 (%), PQ4p5bpw (bpw), PQ16gb (GB).
+# The GGUF filename always uses target bpw: PQ4.5 (bpw form; exact); PQ<bpw>
+# (% and GB forms; bpw derived from model domain parameters after Stage E).
 #
 # Override per-run with `--budget 30` or `--budget 4.5bpw` or `--budget 16GB`.
 # ──────────────────────────────────────────────────────────────────────────────

@@ -184,7 +184,8 @@ This runs all 9 stages:
 | H | apply allocation | 1–3 min |
 | I | PPL eval | 1–2 min |
 
-Final GGUF lands at `~/.prismaquant-llama/ggufs/gemma-3-4b-it-PQ25-111.gguf`.
+Final GGUF lands at `~/.prismaquant-llama/ggufs/gemma-3-4b-it-PQ4.85-111.gguf`
+(label is the target bpw derived from the 25% budget; exact value is model-dependent).
 
 **Re-running** the same model with different budget/priority is fast —
 Stages A–E cache and skip on re-run. Only F–I re-execute (~5–10 min).
@@ -253,16 +254,17 @@ After a run completes:
 │   ├── probe/gemma-3-4b-it-probe.pkl               Stage C
 │   └── imatrix-cache/<sha>__<sha>__c50.imatrix.gguf  Stage D
 ├── ggufs/
-│   └── gemma-3-4b-it-PQ25-111.gguf                 ← THE FINAL GGUF
+│   └── gemma-3-4b-it-PQ4.85-111.gguf               ← THE FINAL GGUF
 └── work/gemma-3-4b-it-<timestamp>/                 per-run scratch
     ├── costs/costs.csv                              Stage E
     ├── bridge.json                                  Stage F
-    ├── recipes/recipe-PQ25-111.json                 Stage G
+    ├── recipes/recipe-PQ4.85-111.json               Stage G
     └── logs/                                        all subprocess output
 ```
 
-**Filename convention**: `<model>-PQ<budget>-<priority>.gguf` — so
-`PQ25-111` is "25% target, equal-priority".
+**Filename convention**: `<model>-PQ<bpw>-<priority>.gguf` where `<bpw>` is the
+target bits-per-weight (2 decimals, trailing zeros stripped) — so `PQ4.85-111`
+means "4.85 bpw target (derived from 25% budget), equal-priority".
 
 ---
 

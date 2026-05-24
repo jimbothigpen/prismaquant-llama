@@ -34,7 +34,7 @@ C. Probe: HF Fisher trace (one bf16 forward pass)            → probe.pkl
 D. Generate imatrix (llama-imatrix)                           → imatrix.gguf
 E. Measure per-(tensor, format) MSE (llama-quantize-cost)     → costs.csv
 F. Bridge HF tensor names → GGUF tensor names + Fisher        → bridge.json
-G. Allocate per-tensor formats (multi-choice knapsack)        → recipe-PQ<budget>-<XYZ>.json
+G. Allocate per-tensor formats (multi-choice knapsack)        → recipe-PQ<bpw>-<XYZ>.json
 H. Apply recipe (llama-quantize --tensor-type-file)           → final GGUF
 I. Optional: PPL eval (llama-perplexity)
 ```
@@ -152,16 +152,18 @@ Before trusting a run, sanity-check:
 Prismaquant GGUFs use the pattern:
 
 ```
-<base-model>-PQ<label>-<XYZ>.gguf
+<base-model>-PQ<bpw>-<XYZ>.gguf
 ```
 
 Where:
 
 - `PQ` = prismaquant prefix (distinguishes from Bartowski/standard quants)
-- `<label>` = budget label encoding the input form:
-  - `PQ25` — 25% of BF16
-  - `PQ4p5bpw` — 4.5 bits-per-weight (`.` → `p` in filenames)
-  - `PQ16gb` — 16 GB absolute (lowercase `gb`)
+- `<bpw>` = target bits-per-weight over the unpinned allocator domain, formatted
+  as 2 decimal places with trailing zeros stripped: `4.0` → `PQ4`, `4.50` → `PQ4.5`,
+  `4.85` → `PQ4.85`. With `--budget 4.5bpw` the label is `PQ4.5` exactly.
+  With `--budget 25%` or `--budget 16GB`, the bpw is derived from the model's
+  domain parameters (pinned-tensor sizes + unpinned parameter count) after
+  Stage E and may look like `PQ4.85` or `PQ5.2`.
 - `<XYZ>` = 3-digit priority code: `X` = PPL weight, `Y` = TG (token-generation) speed weight, `Z` = PP (prompt-processing) speed weight, each `0`–`9`. Higher digit = higher allocator priority. Common combinations: `522` (PPL-heavy), `900` (pure PPL), `333` (balanced), `252` (TG-favoring), `225` (PP-favoring). When a single weight is dominant (e.g. `009`, `090`, `900`), the allocator may collapse to the same recipe regardless of how the remaining zero-weights split.
 
 ---
