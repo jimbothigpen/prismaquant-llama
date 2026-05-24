@@ -37,6 +37,19 @@ _GB_RE  = re.compile(r"^\s*([-+]?[0-9]*\.?[0-9]+)\s*gb\s*$",  re.IGNORECASE)
 _PCT_RE = re.compile(r"^\s*([-+]?[0-9]*\.?[0-9]+)\s*%?\s*$")
 
 
+def format_bpw_label(bpw: float) -> str:
+    """Format a bpw float as a canonical filename-safe string.
+
+    Two decimal places, trailing zeros stripped, then trailing dot stripped.
+    This value is always the *target* bpw over the unpinned allocator domain,
+    NOT the on-disk effective bpw (which includes pinned tensors at higher
+    precision and may imply a different "effective bpw" from file size alone).
+
+    Examples: 3.5 → "3.5", 4.0 → "4", 4.85 → "4.85", 3.4732 → "3.47".
+    """
+    return f"{bpw:.2f}".rstrip("0").rstrip(".")
+
+
 @dataclass(frozen=True)
 class BudgetSpec:
     """Parsed budget: form + numeric value + original user string."""
@@ -48,19 +61,25 @@ class BudgetSpec:
     def filename_label(self) -> str:
         """Return the ``PQ<label>`` fragment used in filenames.
 
+        For ``bpw`` form the label is the v2 canonical bpw label
+        (``format_bpw_label(self.value)``).  For ``pct`` and ``gb`` forms
+        the pipeline derives the target bpw at Stage E and uses
+        ``format_bpw_label`` there; the labels below are only relevant
+        for ``show-frontier --budget`` glob-filtering and are not used
+        as actual pipeline output filenames in v2.
+
         Examples:
-          25%   → "PQ25"
-          4.5bpw → "PQ4p5bpw"    (. → p for filesystem cleanliness)
-          4bpw   → "PQ4bpw"
-          16GB   → "PQ16gb"       (lowercase suffix)
-          4.5GB  → "PQ4p5gb"
+          4.5bpw → "PQ4.5"   (v2 canonical bpw label)
+          4bpw   → "PQ4"
+          25%    → "PQ25"    (v1-style; not a pipeline output filename in v2)
+          16GB   → "PQ16gb"  (v1-style; not a pipeline output filename in v2)
         """
+        if self.form == "bpw":
+            return f"PQ{format_bpw_label(self.value)}"
         if self.form == "pct":
             return f"PQ{int(self.value)}"
-        v = f"{self.value:g}"  # removes trailing zeros: 4.50 → '4.5', 16.0 → '16'
+        v = f"{self.value:g}"
         v = v.replace(".", "p")
-        if self.form == "bpw":
-            return f"PQ{v}bpw"
         return f"PQ{v}gb"
 
     @property
