@@ -41,7 +41,7 @@ K-quant at equal PPL, OR equal size at noticeably better PPL.
 
 1. **A llama.cpp build** with `llama-quantize`, `llama-imatrix`,
    `llama-perplexity`, `llama-bench`. Any modern fork works (mainline,
-   ik_llama, jimbothigpen/llama.cpp). Either put them on `$PATH`, or set
+   ik_llama, any fork). Either put them on `$PATH`, or set
    `path = "/your/llama/bin"` in the config (see below).
 
 2. **`llama-quantize-cost`** — Stage E needs a custom binary not in
@@ -121,9 +121,11 @@ itself — install them alongside:
 pip install --user gguf sentencepiece protobuf
 ```
 
-> Use the fork-vendored `gguf` (`pip install git+https://github.com/jimbothigpen/llama.cpp gguf-py`)
-> rather than the mainline PyPI `gguf` if your target model uses architectures
-> added by jimbothigpen/llama.cpp (Gemma-4, Eagle3, NemotronH, etc.).
+> Install `gguf-py` from your llama.cpp source tree (typically
+> `pip install -e /path/to/llama.cpp/gguf-py`) to ensure architecture support
+> matches your build. Mainline PyPI `gguf` works for mainline-supported
+> architectures; install your fork's `gguf-py` if you need fork-specific
+> architecture support.
 
 ---
 
@@ -228,7 +230,7 @@ libs           = ""
 - `imatrix_chunks = 200` — production-grade imatrix (slower)
 - `ppl_chunks = 100` — tighter PPL stderr in eval
 
-**Adding fork-specific quants** (ik_llama, jimbothigpen/llama.cpp, etc.) — just
+**Adding fork-specific quants** (ik_llama, any fork, etc.) — just
 append to the `quants` list. The shipped default is mainline-only because
 that's the lowest-common-denominator. To see what your binary supports:
 

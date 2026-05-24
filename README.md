@@ -73,7 +73,7 @@ cmake --build /path/to/your/llama.cpp/build --target llama-quantize-cost
 
 The resulting binary lands at `build/bin/llama-quantize-cost` — same
 directory as `llama-quantize`. Works against mainline, ik_llama,
-jimbothigpen/llama.cpp, etc. The tool's full README documents the build / verify
+any fork, etc. The tool's full README documents the build / verify
 workflow.
 
 ## Usage
@@ -314,7 +314,7 @@ llama.cpp source tree. We auto-find it at `<fork>/convert_hf_to_gguf.py`
 or pass `--convert-script /path/to/convert_hf_to_gguf.py`.
 
 **Mainline-only quants** ship as the default. Users running a fork
-(ik_llama, jimbothigpen/llama.cpp, etc.) can hand-add fork-specific formats —
+(ik_llama, any fork, etc.) can hand-add fork-specific formats —
 run `llama-quantize --help` against your binary to see the full list.
 
 **Bundled corpora** (used when `ppl_corpus` / `imatrix_corpus` are empty):

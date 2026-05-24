@@ -34,7 +34,7 @@ specifics.
 - Python 3.10 or newer.
 - A llama.cpp build with `llama-quantize`, `llama-imatrix`, `llama-perplexity`,
   and `llama-bench`. Any modern fork works (mainline ggml-org, ik_llama,
-  jimbothigpen/llama.cpp). Either add the binaries to `$PATH` or set
+  any fork). Either add the binaries to `$PATH` or set
   `path = "/your/llama/build/bin"` in the config.
 - Disk space: roughly **2–2.5× the BF16 size** of the target model at peak
   (source safetensors + BF16 GGUF + final GGUF simultaneously on disk).
@@ -94,15 +94,17 @@ help.
 `prismaquant-llama run` shells out to `convert_hf_to_gguf.py` (from your
 llama.cpp source tree) at Stage B. That script imports `gguf`, `sentencepiece`,
 and `google.protobuf`, none of which are declared deps of prismaquant-llama
-itself. Install the fork-vendored versions:
+itself. Install the required packages:
 
 ```bash
-pip install git+https://github.com/jimbothigpen/llama.cpp gguf-py
 pip install sentencepiece protobuf
 ```
 
-Use the fork's `gguf-py`, not the mainline PyPI `gguf` package — the fork's
-version includes `MODEL_ARCH.EAGLE3` and other additions absent from upstream.
+Install `gguf-py` from your llama.cpp source tree (typically
+`pip install -e /path/to/llama.cpp/gguf-py`) to ensure architecture support
+matches your build. Mainline PyPI `gguf` works for mainline-supported
+architectures; install your fork's `gguf-py` if you need fork-specific
+architecture support.
 
 The test suite also needs these three packages
 (`tests/test_preflight_deps.py` reports 2/3 failures when they're absent — see
@@ -138,7 +140,7 @@ cmake --build /path/to/your/llama.cpp/build --target llama-quantize-cost
 ```
 
 The resulting binary lands next to `llama-quantize` in your build's `bin/`
-directory. It works against mainline, ik_llama, and jimbothigpen/llama.cpp
+directory. It works against mainline, ik_llama, and any fork
 without modification. See the tool's README for a verify workflow.
 
 **Symlink note.** Older setups may have a `tools/quantize-cost` symlink that
@@ -1224,11 +1226,14 @@ from the 4 GB budget and model domain parameters after Stage E).
 **Fix:**
 
 ```bash
-pip install git+https://github.com/jimbothigpen/llama.cpp gguf-py
 pip install sentencepiece protobuf
 ```
 
-Use the fork's `gguf-py`, not PyPI's `gguf`.
+Install `gguf-py` from your llama.cpp source tree (typically
+`pip install -e /path/to/llama.cpp/gguf-py`) to ensure architecture support
+matches your build. Mainline PyPI `gguf` works for mainline-supported
+architectures; install your fork's `gguf-py` if you need fork-specific
+architecture support.
 
 ### Stage D / Stage I OOM with eager-load config
 

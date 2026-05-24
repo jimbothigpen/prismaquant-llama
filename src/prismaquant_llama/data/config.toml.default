@@ -68,7 +68,7 @@ path = ""
 # list, minimizing predicted Δloss under the size budget.
 #
 # DEFAULT BELOW: mainline llama.cpp formats only. If you use a fork that adds
-# extra quants (ik_llama, frankenturbo, etc.), append them here by hand —
+# extra quants (ik_llama, any fork with extra quants, etc.), append them here by hand —
 # e.g. add "IQ4_K", "IQ4_KS", "IQ4_KSS", "IQ3_K", "IQ3_KS" for ik_llama.
 # Run `llama-quantize --help` against your binary to see what's available.
 #

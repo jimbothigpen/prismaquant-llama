@@ -120,7 +120,7 @@ value through `parse_budget()` to derive the glob pattern for summary files.
   NVFP4-assigned tensors without a measured costs.csv row (e.g. tensors
   assigned by shape-propagation from exemplar layers); previously the lookup
   fell off the end and the tensor was silently skipped as `skip:unknown`.
-- No other code changes; the upstream-yggdrasil quantize-cost binary already
+- No other code changes; the upstream llama.cpp quantize-cost binary already
   accepts `--types NVFP4` (resolves via `ggml_type_name()` enumeration; no
   hardcoded whitelist there) so costs.csv rows for NVFP4 populate normally
   when requested.
