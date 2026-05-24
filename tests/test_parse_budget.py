@@ -5,12 +5,12 @@ Covers:
   validation errors (zero, negative, bpw>16, unknown suffix)
 - budget_from_toml: int → pct, float → pct, str → parse_budget
 - check_mixed_units: homogeneous passes, mixed raises
-- BudgetSpec.filename_label and display_str properties
-- Cache-key equivalence: two equivalent budgets (different units) that would
-  produce the same budget_gb will share a recipe cache key only once budget_gb
-  is resolved — confirmed by checking that filename_label differs (they ARE
-  different labels, so two different budget specs produce two different filenames
-  as intended; the budget_gb unification happens in the pipeline, not here).
+- format_bpw_label: 2-decimal-trim canonical bpw label formatter
+- BudgetSpec.filename_label: v2 bpw form returns PQ<bpw>; pct/gb retain
+  v1-style labels for --budget glob-filtering
+- Cache-key and filename-label invariance: equivalent bpw values produce
+  the same label via format_bpw_label; the same target_bpw derived from
+  different input forms produces the same filename label.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from prismaquant_llama.budget import (
     BudgetSpec,
     budget_from_toml,
     check_mixed_units,
+    format_bpw_label,
     parse_budget,
 )
 
@@ -80,15 +81,42 @@ def test_parse_budget_invalid(spec, fragment):
 
 
 # ---------------------------------------------------------------------------
-# BudgetSpec.filename_label
+# format_bpw_label — canonical 2-decimal-trim bpw formatter
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bpw,expected", [
+    (3.5,     "3.5"),
+    (4.0,     "4"),
+    (4.85,    "4.85"),
+    (3.4732,  "3.47"),
+    # edge cases
+    (0.5,     "0.5"),
+    (10.0,    "10"),
+    (16.00001, "16"),
+    (4.999,   "5"),    # rounds up at 3rd decimal
+    (3.515,   "3.52"), # rounds up (3.505 has fp representation issues)
+    (2.75,    "2.75"),
+    (3.0,     "3"),
+    (4.5,     "4.5"),
+])
+def test_format_bpw_label(bpw, expected):
+    assert format_bpw_label(bpw) == expected
+
+
+# ---------------------------------------------------------------------------
+# BudgetSpec.filename_label — v2: bpw form uses canonical bpw label
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("spec,expected_label", [
+    # bpw form: v2 canonical label
+    ("4.5bpw",  "PQ4.5"),
+    ("3bpw",    "PQ3"),
+    ("2.75bpw", "PQ2.75"),
+    ("4bpw",    "PQ4"),
+    # pct form: v1-style label (used only for --budget glob-filter, not pipeline filenames)
     ("25",      "PQ25"),
     ("25%",     "PQ25"),
-    ("4.5bpw",  "PQ4p5bpw"),
-    ("3bpw",    "PQ3bpw"),
-    ("2.75bpw", "PQ2p75bpw"),
+    # gb form: v1-style label (same caveat)
     ("16GB",    "PQ16gb"),
     ("4.75GB",  "PQ4p75gb"),
     ("8GB",     "PQ8gb"),
@@ -179,17 +207,34 @@ def test_check_mixed_units_raises(raw_specs):
 
 
 # ---------------------------------------------------------------------------
-# Filename label uniqueness — different units produce different labels
+# format_bpw_label invariance — same bpw value → same label (cache-key safety)
 # ---------------------------------------------------------------------------
 
-def test_different_units_produce_different_labels():
-    """Two budget specs that happen to hit the same budget_gb in the pipeline
-    still have distinct filename_labels, so they don't collide in filenames.
-    The budget_gb unification is the pipeline's concern, not the parser's."""
-    a = parse_budget("25")     # PQ25
-    b = parse_budget("16GB")   # PQ16gb
-    assert a.filename_label != b.filename_label
+def test_format_bpw_label_is_deterministic():
+    """The same float always maps to the same label."""
+    assert format_bpw_label(4.5) == format_bpw_label(4.5)
+    assert format_bpw_label(4.0) == format_bpw_label(4.0)
 
-def test_equivalent_pct_labels_are_equal():
-    """'25' and '25%' are the same spec."""
-    assert parse_budget("25").filename_label == parse_budget("25%").filename_label
+def test_bpw_spec_filename_label_matches_format_bpw_label():
+    """BudgetSpec.filename_label for bpw form is PQ + format_bpw_label."""
+    for bpw_str, bpw_val in [("4.5bpw", 4.5), ("3bpw", 3.0), ("2.75bpw", 2.75)]:
+        b = parse_budget(bpw_str)
+        assert b.filename_label == f"PQ{format_bpw_label(bpw_val)}"
+
+def test_equivalent_target_bpw_produces_same_label():
+    """Two pipeline runs that derive the same target_bpw produce the same
+    filename label, regardless of input form. Simulated here by checking
+    format_bpw_label on equal floats."""
+    derived_bpw_from_pct = 4.5      # hypothetical: 25% of some model = 4.5 bpw
+    explicit_bpw = 4.5              # user passed --budget 4.5bpw
+    assert format_bpw_label(derived_bpw_from_pct) == format_bpw_label(explicit_bpw)
+    assert f"PQ{format_bpw_label(derived_bpw_from_pct)}" == parse_budget("4.5bpw").filename_label
+
+def test_pct_form_label_unchanged():
+    """pct form still returns v1-style PQ<N> label for --budget glob-filtering."""
+    assert parse_budget("25").filename_label == "PQ25"
+    assert parse_budget("25%").filename_label == parse_budget("25").filename_label
+
+def test_gb_form_label_unchanged():
+    """gb form retains v1-style label for --budget glob-filtering."""
+    assert parse_budget("16GB").filename_label == "PQ16gb"
