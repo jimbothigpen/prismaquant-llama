@@ -172,6 +172,30 @@ def download_hf(cfg: Config, layout: Layout, hf_id: str,
     return target
 
 
+def _stage_b_extra_args(safetensors_dir: Path) -> list[str]:
+    """Return extra args for Stage B convert_hf_to_gguf.py.
+
+    Qwen3.5/3.6 models bundle an MTP head as blk.32 by default; that block
+    lacks attn_norm.weight so llama-imatrix rejects the file at Stage D.
+    Passing --no-mtp produces a trunk-only BF16 that all downstream stages
+    can load. Requires convert_hf_to_gguf.py with --no-mtp support.
+    """
+    config_json = safetensors_dir / "config.json"
+    if not config_json.exists():
+        return []
+    try:
+        with config_json.open() as f:
+            hf_cfg = json.load(f)
+    except Exception:
+        return []
+    # Use architecture name: most explicit signal; avoids ambiguity with
+    # num_nextn_predict_layers which Qwen3.5 stores as text_config.mtp_num_hidden_layers.
+    arch = (hf_cfg.get("architectures") or [None])[0] or ""
+    if arch.startswith(("Qwen3_5", "Qwen3_6")):
+        return ["--no-mtp"]
+    return []
+
+
 def convert_to_bf16(cfg: Config, layout: Layout,
                     safetensors_dir: Path, model_name: str) -> Path:
     """Stage B. Convert safetensors → reference GGUF (BF16 or F16, per
@@ -185,8 +209,9 @@ def convert_to_bf16(cfg: Config, layout: Layout,
         return out
     convert_script = _find_convert_script(cfg)
     _log(layout, "B", f"B. converting {safetensors_dir} → {out}")
+    extra = _stage_b_extra_args(safetensors_dir)
     rc = _run([sys.executable, str(convert_script), str(safetensors_dir),
-               "--outtype", cfg.reference_format, "--outfile", str(out)],
+               "--outtype", cfg.reference_format, "--outfile", str(out)] + extra,
               layout.logs_dir / "stage-B.log",
               env=subprocess_env(cfg))
     if rc != 0 or not out.exists():

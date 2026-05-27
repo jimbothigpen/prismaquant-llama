@@ -9,6 +9,26 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-27 — Qwen3.5/3.6 Stage B: trunk-only BF16 via `--no-mtp`
+
+Stage B (`convert_to_bf16`) now passes `--no-mtp` to `convert_hf_to_gguf.py`
+when the source model is Qwen3.5 or Qwen3.6 (detected by HF `architectures[0]`
+starting with `Qwen3_5` or `Qwen3_6`).
+
+**Problem:** Without `--no-mtp`, the convert script bundles the MTP head as
+block 32 in the BF16 GGUF. That block's tensor structure differs from the 32
+main attention blocks (it lacks `attn_norm.weight`), so `llama-imatrix` rejects
+the file at Stage D with `missing tensor 'blk.32.attn_norm.weight'` and the
+calibration pipeline fails.
+
+**Fix:** The trunk-only BF16 produced by `--no-mtp` loads correctly in all
+downstream stages (D, C, E, F, I). The separate MTP-quantize passthrough at
+Stage H (`--mtp-tensors / --mtp-format`) is unaffected.
+
+**Requirement:** `convert_hf_to_gguf.py` must have `--no-mtp` flag support for
+Qwen3.5/3.6 inputs. Older convert script builds without this flag will exit with
+an argparse error (exit code 2) on these architectures.
+
 ### 2026-05-24 — bpw-canonical GGUF output filenames (v2 filename scheme)
 
 The GGUF output filename now always encodes the **target bits-per-weight** over
