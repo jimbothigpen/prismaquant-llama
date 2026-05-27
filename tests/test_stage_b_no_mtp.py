@@ -113,6 +113,9 @@ def _run_stage_b(monkeypatch, tmp_path: Path, architecture: str) -> list[str]:
     monkeypatch.setattr(pr, "_find_convert_script",
                         lambda cfg: Path("/fake/convert_hf_to_gguf.py"))
     monkeypatch.setattr(pr, "subprocess_env", lambda cfg: {})
+    # Stub out metadata patcher — fake_run writes a non-GGUF placeholder file;
+    # the patcher is tested separately in test_no_mtp_meta_patch.py.
+    monkeypatch.setattr(pr, "_patch_no_mtp_metadata", lambda _: None)
 
     pr.convert_to_bf16(cfg, layout, safetensors_dir, "test-model")
     assert captured, "convert_to_bf16 did not call _run"

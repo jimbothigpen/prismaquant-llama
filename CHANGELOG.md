@@ -9,6 +9,21 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-27 — Post-Stage-B GGUF metadata patch for `--no-mtp` models
+
+After Stage B completes for `--no-mtp` models (Qwen3.5/3.6), the BF16 GGUF
+is now patched in place to correct stale KV metadata left by yggdrasil's
+`convert_hf_to_gguf.py --no-mtp`: that flag strips the MTP-head tensors but
+does **not** update `<arch>.block_count` or zero `<arch>.nextn_predict_layers`,
+causing Stage D (`llama-imatrix`) to fail with
+`missing tensor 'blk.32.attn_norm.weight'` when it walks block_count.
+
+The patch decrements `block_count` by `nextn_predict_layers` and zeros
+`nextn_predict_layers` via an in-place mmap write (fixed-size uint32 — no byte
+offset shifts). It is defensive: becomes a no-op once yggdrasil ships its own
+fix (field will already be 0), and is skipped entirely for any GGUF that lacks
+the `nextn_predict_layers` field.
+
 ### 2026-05-27 — Qwen3.5/3.6 Stage B: trunk-only BF16 via `--no-mtp`
 
 Stage B (`convert_to_bf16`) now passes `--no-mtp` to `convert_hf_to_gguf.py`

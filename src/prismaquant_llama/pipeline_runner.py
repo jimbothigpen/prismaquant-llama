@@ -196,6 +196,37 @@ def _stage_b_extra_args(safetensors_dir: Path) -> list[str]:
     return []
 
 
+def _patch_no_mtp_metadata(bf16_path: Path) -> tuple[int, int] | None:
+    """Fix GGUF KV metadata left stale by yggdrasil's --no-mtp convert path.
+
+    yggdrasil's convert_hf_to_gguf.py --no-mtp strips the MTP-head tensors
+    but does NOT update <arch>.block_count or zero <arch>.nextn_predict_layers.
+    llama.cpp trusts block_count, walks to the (absent) MTP block, and fails
+    with "missing tensor 'blk.<N>.attn_norm.weight'". Patch in place; becomes
+    a no-op once yggdrasil ships its own fix (nextn_predict_layers will be 0).
+    """
+    from gguf import GGUFReader
+    r = GGUFReader(str(bf16_path), mode="r+")
+    arch_field = r.fields.get("general.architecture")
+    if arch_field is None:
+        return None
+    arch = bytes(arch_field.parts[arch_field.data[0]]).decode("utf-8")
+    nextn_field = r.fields.get(f"{arch}.nextn_predict_layers")
+    if nextn_field is None:
+        return None
+    old_nextn = int(nextn_field.parts[nextn_field.data[0]][0])
+    if old_nextn == 0:
+        return None
+    bc_field = r.fields.get(f"{arch}.block_count")
+    if bc_field is None:
+        return None
+    old_bc = int(bc_field.parts[bc_field.data[0]][0])
+    bc_field.parts[bc_field.data[0]][0] = old_bc - old_nextn
+    nextn_field.parts[nextn_field.data[0]][0] = 0
+    r.data.flush()
+    return (old_bc, old_nextn)
+
+
 def convert_to_bf16(cfg: Config, layout: Layout,
                     safetensors_dir: Path, model_name: str) -> Path:
     """Stage B. Convert safetensors → reference GGUF (BF16 or F16, per
@@ -216,6 +247,13 @@ def convert_to_bf16(cfg: Config, layout: Layout,
               env=subprocess_env(cfg))
     if rc != 0 or not out.exists():
         raise SystemExit(f"FAIL: B convert_hf_to_gguf.py exit={rc}")
+    if "--no-mtp" in extra:
+        patched = _patch_no_mtp_metadata(out)
+        if patched is not None:
+            old_bc, old_nx = patched
+            _log(layout, "B",
+                 f"B. patched no-mtp metadata: block_count {old_bc}→{old_bc - old_nx}, "
+                 f"nextn_predict_layers {old_nx}→0")
     _log(layout, "B", f"B. {ref_upper} GGUF: {out.stat().st_size/1024**3:.2f} GB")
     return out
 
