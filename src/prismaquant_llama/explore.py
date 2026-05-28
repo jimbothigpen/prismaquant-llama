@@ -385,6 +385,10 @@ def add_explore_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--output-md", type=Path, default=None,
                    help="write the sweep matrix as Markdown to this path")
     p.add_argument("--yes", "-y", action="store_true")
+    p.add_argument("--no-mmap", action="store_true", default=False, dest="no_mmap",
+                   help="force --no-mmap on every llama-binary subprocess that "
+                        "supports it (overrides imatrix_eager_load / ppl_eager_load "
+                        "TOML keys for this run; default off = streaming)")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

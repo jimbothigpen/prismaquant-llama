@@ -110,6 +110,13 @@ class Config:
     imatrix_eager_load: bool = False  # Stage D (llama-imatrix)
     ppl_eager_load: bool = False      # Stages I, K-ref, K-cand, calibration
 
+    # Global --no-mmap override: when True, pass the mmap-disable flag to
+    # every llama-binary subprocess that supports it (llama-imatrix,
+    # llama-perplexity: --no-mmap; llama-bench: --mmap 0). ORs over
+    # imatrix_eager_load / ppl_eager_load so the per-stage toggles remain
+    # functional. Set via --no-mmap CLI flag or no_mmap TOML key.
+    no_mmap: bool = False
+
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -230,6 +237,7 @@ def load_config(config_path: Optional[Path] = None,
 
     imatrix_eager_load = bool(section.get("imatrix_eager_load", False))
     ppl_eager_load = bool(section.get("ppl_eager_load", False))
+    no_mmap = bool(section.get("no_mmap", False))
 
     # Stage F+ lives in its own top-level [precondition] table for room to
     # grow as P2-P5 add method-specific knobs (awq strategy, gptq damping,
@@ -284,6 +292,7 @@ def load_config(config_path: Optional[Path] = None,
         kl_ppl_chunks=kl_ppl_chunks,
         imatrix_eager_load=imatrix_eager_load,
         ppl_eager_load=ppl_eager_load,
+        no_mmap=no_mmap,
         config_path=config_path,
     )
 

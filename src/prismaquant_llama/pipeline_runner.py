@@ -81,6 +81,18 @@ def _run(cmd: list[str], log_path: Path, env: Optional[dict] = None,
     return proc.returncode
 
 
+def _no_mmap_args(bin_name: str) -> list[str]:
+    """Return the mmap-disable flag(s) for a given llama-binary.
+
+    llama-bench uses --mmap 0 (value flag); all others use --no-mmap (bool flag).
+    llama-quantize and llama-quantize-cost do not support any mmap flag — callers
+    must skip gating for those binaries.
+    """
+    if bin_name == "llama-bench":
+        return ["--mmap", "0"]
+    return ["--no-mmap"]
+
+
 def _file_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -337,8 +349,8 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
     imatrix_args = [str(imatrix_bin), "-m", str(bf16_path),
                     "-f", str(imatrix_corpus), "-o", str(cache),
                     "-c", str(ctx), "-ngl", "99"]
-    if cfg.imatrix_eager_load:
-        imatrix_args.append("--no-mmap")
+    if cfg.no_mmap or cfg.imatrix_eager_load:
+        imatrix_args.extend(_no_mmap_args("llama-imatrix"))
     imatrix_args += ["--chunks", str(cfg.imatrix_chunks),
                      "-ctk", "f16", "-ctv", "f16"]
     rc = _run(imatrix_args,
@@ -674,8 +686,8 @@ def _stage_k_reference_ppl(cfg: Config, layout: Layout, bf16_path: Path,
                  "-c", "4096", "-b", "2048",
                  "-ctk", "f16", "-ctv", "f16", "-fa", "on",
                  "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks)]
-    if cfg.ppl_eager_load:
-        kref_args.append("--no-mmap")
+    if cfg.no_mmap or cfg.ppl_eager_load:
+        kref_args.extend(_no_mmap_args("llama-perplexity"))
     rc = _run(kref_args, log, env=subprocess_env(cfg))
     import re as _re
     m = _re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)",
@@ -827,8 +839,8 @@ def stage_k_validate(cfg: Config, layout: Layout,
                           "-c", "4096", "-b", "2048",
                           "-ctk", "f16", "-ctv", "f16", "-fa", "on",
                           "-ngl", "99", "--chunks", str(cfg.kl_ppl_chunks)]
-            if cfg.ppl_eager_load:
-                kcand_args.append("--no-mmap")
+            if cfg.no_mmap or cfg.ppl_eager_load:
+                kcand_args.extend(_no_mmap_args("llama-perplexity"))
             rc = _run(kcand_args, ppl_log, env=subprocess_env(cfg))
             if rc != 0:
                 _log(layout, "K",
@@ -1005,8 +1017,8 @@ def stage_i_eval(cfg: Config, layout: Layout, gguf: Path,
                     "-c", str(ctx), "-b", "2048",
                     "-ctk", "f16", "-ctv", "f16", "-fa", "on",
                     "-ngl", "99", "--chunks", str(cfg.ppl_chunks)]
-    if cfg.ppl_eager_load:
-        stage_i_args.append("--no-mmap")
+    if cfg.no_mmap or cfg.ppl_eager_load:
+        stage_i_args.extend(_no_mmap_args("llama-perplexity"))
     rc = _run(stage_i_args, log, env=subprocess_env(cfg))
     import re as _re
     text = log.read_text()
@@ -1848,6 +1860,10 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                         "below this threshold — the literal 'disable below 4 "
                         "bits' cutoff. Default: from [precondition].bpw_floor "
                         "in config (typically 4.0).")
+    p.add_argument("--no-mmap", action="store_true", default=False, dest="no_mmap",
+                   help="force --no-mmap on every llama-binary subprocess that "
+                        "supports it (overrides imatrix_eager_load / ppl_eager_load "
+                        "TOML keys for this run; default off = streaming)")
 
 
 def cfg_from_args(args) -> Config:
@@ -1884,6 +1900,8 @@ def cfg_from_args(args) -> Config:
         cfg.precondition_mode = args.precondition
     if getattr(args, "precondition_bpw_floor", None) is not None:
         cfg.precondition_bpw_floor = args.precondition_bpw_floor
+    if getattr(args, "no_mmap", False):
+        cfg.no_mmap = True
     return cfg
 
 

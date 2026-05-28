@@ -50,7 +50,7 @@ from .input_resolver import ResolvedInput, resolve as resolve_input
 from .paths import Layout, wipe_model_artifacts
 from .pipeline_runner import (download_hf, convert_to_bf16, download_gguf_url,
                               stage_d_imatrix, _resolve_imatrix_override,
-                              cfg_from_args,
+                              cfg_from_args, _no_mmap_args,
                               estimate_calibrate, confirm_or_abort)
 
 
@@ -139,8 +139,8 @@ def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path,
                   "-c", "2048", "-ngl", "99", "-fa", "on",
                   "-ctk", "f16", "-ctv", "f16",
                   "--chunks", str(cfg.ppl_chunks)]
-    if cfg.ppl_eager_load:
-        calib_args.append("--no-mmap")
+    if cfg.no_mmap or cfg.ppl_eager_load:
+        calib_args.extend(_no_mmap_args("llama-perplexity"))
     rc, log = _run_cmd(calib_args, subprocess_env(cfg), log_path)
     m = re.search(r"Final estimate:\s*PPL\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)", log)
     if not m:
@@ -154,11 +154,12 @@ def _measure_perplexity(cfg: Config, gguf: Path, corpus: Path,
 def _measure_bench(cfg: Config, gguf: Path, log_path: Path
                    ) -> tuple[Optional[float], Optional[float]]:
     bin_ = find_tool(cfg, "llama-bench")
-    rc, log = _run_cmd(
-        [str(bin_), "-m", str(gguf), "-p", "512", "-n", "128",
-         "-t", "12", "-ngl", "99", "-fa", "1",
-         "-ctk", "f16", "-ctv", "f16", "--output", "csv"],
-        subprocess_env(cfg), log_path)
+    bench_cmd = [str(bin_), "-m", str(gguf), "-p", "512", "-n", "128",
+                 "-t", "12", "-ngl", "99", "-fa", "1",
+                 "-ctk", "f16", "-ctv", "f16", "--output", "csv"]
+    if cfg.no_mmap:
+        bench_cmd.extend(_no_mmap_args("llama-bench"))
+    rc, log = _run_cmd(bench_cmd, subprocess_env(cfg), log_path)
     pp = tg = None
     for line in log.splitlines():
         if '"512","0","0"' in line:
@@ -568,6 +569,10 @@ def add_calibrate_args(p: argparse.ArgumentParser) -> None:
                         "entire calibration is recomputed from scratch. Use "
                         "after a llama.cpp bugfix that invalidates prior "
                         "measurements.")
+    p.add_argument("--no-mmap", action="store_true", default=False, dest="no_mmap",
+                   help="force --no-mmap on every llama-binary subprocess that "
+                        "supports it (overrides imatrix_eager_load / ppl_eager_load "
+                        "TOML keys for this run; default off = streaming)")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

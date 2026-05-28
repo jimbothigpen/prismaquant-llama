@@ -430,6 +430,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "predicted size + ΔPPL alongside measured values "
                         "for simulator-vs-reality comparison. Join key is "
                         "(budget_pct from summary filename, priority).")
+    p.add_argument("--no-mmap", action="store_true", default=False, dest="no_mmap",
+                   help="(no-op for show-frontier; accepted for CLI surface "
+                        "consistency — show-frontier does not invoke any "
+                        "llama-binary subprocesses)")
     args = p.parse_args(argv)
 
     cfg = load_config(args.config)
