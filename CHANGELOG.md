@@ -9,6 +9,54 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-28 — `--imatrix-ctx` CLI flag, `imatrix_ctx` TOML key, and cache-key extension
+
+Exposes the `llama-imatrix` context size (`-c` flag) as a first-class knob on
+all three user-facing subcommands.
+
+**New `Config` field** `imatrix_ctx: int = 512`. Default is **512**, which is:
+
+- The `llama-imatrix` built-in default (`params.n_ctx = 512` in
+  `tools/imatrix/imatrix.cpp`).
+- The explicit personal choice of ikawrakow (the tool's primary developer):
+  "I use 512 tokens most of the time."
+- The recipe used by ubergarm (DeepSeek-V3, Qwen3-235B public imatrix files)
+  and confirmed as "usually performs better than 4096" by mradermacher.
+- The community standard `(-c 512 --chunks 2000)` cited across llama.cpp
+  discussions #5263 and #5006.
+
+Prior hardcoded default was 4096 — **changed to 512** on the above evidence.
+The knob is now exposed so users can override per-run.
+
+**New TOML key** `imatrix_ctx = 512` in the `[prismaquant-llama]` section
+(near `imatrix_chunks`). Parsed by `load_config`; raises `ValueError` if value
+< 1; defaults to 512 when absent.
+
+**New CLI flag** `--imatrix-ctx N` on `run`, `calibrate`, and `explore`
+subcommands. Default `None` (uses config value); explicit value overrides
+`cfg.imatrix_ctx` for that invocation. Wired through `cfg_from_args`.
+
+**`stage_d_imatrix` signature simplified**: the now-redundant `ctx: int = 4096`
+parameter has been removed; the function reads `cfg.imatrix_ctx` directly,
+symmetric to how `cfg.imatrix_chunks` is used.
+
+**Cache-key extension** — `_shared/imatrix-cache/` filenames now include
+`__x{ctx}` between the chunks segment and the `.imatrix.gguf` suffix:
+
+```
+# Old key (no ctx segment — produced by any prior prismaquant-llama version)
+<model-sha12>__<corpus-sha12>__c<chunks>.imatrix.gguf
+
+# New key (ctx segment added)
+<model-sha12>__<corpus-sha12>__c<chunks>__x<ctx>.imatrix.gguf
+```
+
+Existing cached imatrix files under the old key will **not** be picked up and
+will be regenerated on the next run. Old files remain on disk; remove them
+manually if desired (`_shared/imatrix-cache/*.imatrix.gguf` with no `__x`
+segment). Disk cost per imatrix is small (~MB-scale). There is **no
+backwards-compat fallback** — clean break.
+
 ### 2026-05-27 — Global `--no-mmap` CLI flag and `no_mmap` TOML key
 
 A new per-invocation override forces the mmap-disable flag on every llama-binary

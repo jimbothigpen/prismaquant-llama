@@ -274,6 +274,11 @@ ppl_chunks = 50
 # Override per-run: --imatrix-chunks 200
 imatrix_chunks = 50
 
+# Context window size for llama-imatrix. 512 = community standard (diverse
+# short-window samples); 4096 = fewer but longer-range samples.
+# Override per-run: --imatrix-ctx 512
+imatrix_ctx = 512
+
 # Path to convert_hf_to_gguf.py. Empty = auto-discover from the llama.cpp
 # source tree (walks two levels up from `path`). Set explicitly when auto-
 # discovery fails. Override per-run: --convert-script /path/to/script.py
@@ -518,9 +523,9 @@ see `scale length X ≠ in_features Y ... likely a stale act-cache` errors.
 
 Generates the importance matrix using `llama-imatrix` on the BF16 GGUF.
 
-Cache key: `_shared/imatrix-cache/<model-sha>__<corpus-sha>__c<chunks>.imatrix.gguf`.
-Different (`--imatrix-chunks`, corpus, or BF16 content) → different cache entry,
-so changing chunk count invalidates cleanly without manual removal.
+Cache key: `_shared/imatrix-cache/<model-sha>__<corpus-sha>__c<chunks>__x<ctx>.imatrix.gguf`.
+Different (`--imatrix-chunks`, `--imatrix-ctx`, corpus, or BF16 content) → different cache entry,
+so changing chunk count or context size invalidates cleanly without manual removal.
 
 **RAM behavior (since 2026-05-22).** `llama-imatrix` uses OS-level mmap by
 default (streaming; RAM bounded by VRAM + KV cache). Set `imatrix_eager_load =
@@ -873,6 +878,7 @@ The starter config auto-install triggers on any invocation not using `--config`.
 | `--imatrix PATH\|URL` | (generate) | Existing imatrix file; skips Stage D |
 | `--ppl-chunks N` | from config | Chunks for `llama-perplexity` |
 | `--imatrix-chunks N` | from config | Chunks for `llama-imatrix` |
+| `--imatrix-ctx N` | from config | Context size for `llama-imatrix` Stage D (default: 512) |
 | `--convert-script PATH` | auto-discover | Path to `convert_hf_to_gguf.py` |
 | `--purge {yes,no}` | `yes` | Clean up artifacts after run |
 | `--yes` / `-y` | false | Skip pre-flight confirmation (required for scripts) |
@@ -910,6 +916,7 @@ prismaquant-llama calibrate {system|model} INPUT [flags]
 | `--ppl-chunks N` | from config | Chunks for `llama-perplexity` |
 | `--imatrix-corpus PATH\|URL` | from config | imatrix corpus |
 | `--imatrix-chunks N` | from config | Chunks for `llama-imatrix` |
+| `--imatrix-ctx N` | from config | Context size for `llama-imatrix` Stage D (default: 512) |
 | `--imatrix PATH\|URL` | (generate) | Existing imatrix file |
 | `--convert-script PATH` | auto-discover | Path to `convert_hf_to_gguf.py` |
 | `--purge {yes,no}` | `yes` | Clean up after calibration |
@@ -937,6 +944,7 @@ prismaquant-llama explore INPUT [flags]
 | `--imatrix PATH\|URL` | (generate) | Existing imatrix file |
 | `--ppl-chunks N` | from config | Chunks (used by Stage C/D; not Stage I — explore skips I) |
 | `--imatrix-chunks N` | from config | Chunks for `llama-imatrix` |
+| `--imatrix-ctx N` | from config | Context size for `llama-imatrix` Stage D (default: 512) |
 | `--convert-script PATH` | auto-discover | Path to `convert_hf_to_gguf.py` |
 | `--output-csv PATH` | (none) | Also write sweep results as CSV |
 | `--output-md PATH` | (none) | Also write sweep results as Markdown |
@@ -983,6 +991,7 @@ All keys have CLI flag overrides; see §7 for flag names.
 | `imatrix_corpus` | string | `""` | imatrix corpus; empty = bundled bartowski-v5 |
 | `ppl_chunks` | int | `50` | Chunks for `llama-perplexity` (≥1) |
 | `imatrix_chunks` | int | `50` | Chunks for `llama-imatrix` (≥1) |
+| `imatrix_ctx` | int | `512` | Context size per chunk for `llama-imatrix` (≥1). 512 = diverse short-window samples (community standard); 4096 = fewer longer-range samples. |
 | `convert_script` | string (path) | `""` | Path to `convert_hf_to_gguf.py`; empty = auto-discover |
 | `libs` | string (path) | `""` | Extra dir prepended to `LD_LIBRARY_PATH`; empty = no override |
 | `kl_validate` | bool | `false` | Enable Stage K (KL/PPL-validated frontier picker) |
