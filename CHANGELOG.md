@@ -9,6 +9,52 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-27 — Global `--no-mmap` CLI flag and `no_mmap` TOML key
+
+A new per-invocation override forces the mmap-disable flag on every llama-binary
+subprocess that supports it.
+
+**New CLI flag** `--no-mmap` on all four subcommands (`calibrate`, `run`,
+`explore`, `show-frontier`). Accepted everywhere for surface consistency; a
+no-op on `show-frontier` which invokes no llama-binaries.
+
+**New TOML key** `no_mmap = false` in the `[prismaquant-llama]` section. Parsed
+by `load_config`; defaults to `false` when absent (no change to existing
+configs). The CLI flag is a one-shot override — passing `--no-mmap` sets
+`cfg.no_mmap = True` for that invocation regardless of the TOML value.
+
+**Existing per-stage toggles preserved.** `imatrix_eager_load` and
+`ppl_eager_load` remain fully functional. The new global knob ORs over them at
+each call site:
+
+- Stage D `llama-imatrix` gate: `cfg.no_mmap or cfg.imatrix_eager_load`
+- Stages I, K-ref, K-cand, calibration `llama-perplexity` gate:
+  `cfg.no_mmap or cfg.ppl_eager_load`
+
+**Newly gated call site** (previously ungated; only `cfg.no_mmap` applies):
+
+- Calibration `llama-bench` → `--mmap 0` (llama-bench uses a value flag, not
+  `--no-mmap`; user-confirmed)
+
+**Binary support audit** (verified via `--help` against deployed builds):
+
+| Binary | Flag form | Gated |
+|---|---|---|
+| `llama-imatrix` | `--no-mmap` | Yes |
+| `llama-perplexity` | `--no-mmap` | Yes |
+| `llama-bench` | `--mmap 0` | Yes (calibration only) |
+| `llama-quantize` | not supported | No — binary lacks mmap flag |
+| `llama-quantize-cost` | not supported | No — binary lacks mmap flag |
+
+`llama-quantize` and `llama-quantize-cost` lack any mmap-disable option in the
+deployed binaries. Passing an unsupported flag would fail the subprocess, so
+those call sites are left ungated. `llama-quantize-cost` support (if needed)
+requires a separate change in `jimbothigpen/llama-quantize-cost`.
+
+**Default behaviour unchanged**: no mmap-disable flag is passed to any
+subprocess unless `--no-mmap` is given on the CLI or `no_mmap = true` is set
+in config.
+
 ### 2026-05-27 — Post-Stage-B GGUF metadata patch for `--no-mtp` models
 
 After Stage B completes for `--no-mtp` models (Qwen3.5/3.6), the BF16 GGUF

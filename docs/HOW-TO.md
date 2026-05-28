@@ -527,7 +527,8 @@ default (streaming; RAM bounded by VRAM + KV cache). Set `imatrix_eager_load =
 true` to restore the pre-2026-05-22 `--no-mmap` behavior (full model eagerly
 loaded into RAM before computation). Use for small models that fit in RAM when
 predictable timing matters; OOMs on any model whose BF16 size exceeds available
-RAM.
+RAM. The global `no_mmap = true` / `--no-mmap` flag also covers this site (ORs
+over `imatrix_eager_load`).
 
 Override the generated imatrix with `--imatrix /path/or/url` to skip Stage D
 entirely and use an existing file.
@@ -688,7 +689,8 @@ GGUF is already cached by Stage H so repeated `run` invocations pay Stage I
 time even if H is a cache hit).
 
 **RAM behavior.** Same as Stage D: mmap by default since 2026-05-22; set
-`ppl_eager_load = true` to restore `--no-mmap`.
+`ppl_eager_load = true` to restore `--no-mmap`. The global `no_mmap = true` /
+`--no-mmap` flag also covers this site (ORs over `ppl_eager_load`).
 
 Stage I failure (e.g. GPU backend crash after a successful Stage H) does not
 delete the final GGUF. The GGUF is usable; re-run `llama-perplexity` manually
@@ -988,10 +990,11 @@ All keys have CLI flag overrides; see §7 for flag names.
 | `kl_ppl_chunks` | int | `20` | Chunks for Stage K PPL passes (short; ranking only) |
 | `imatrix_eager_load` | bool | `false` | Pass `--no-mmap` to `llama-imatrix` (Stage D); eager full-model RAM load |
 | `ppl_eager_load` | bool | `false` | Pass `--no-mmap` to `llama-perplexity` (Stages I, K-ref, K-cand, calibration) |
+| `no_mmap` | bool | `false` | Global override: force mmap-disable on every supporting llama-binary subprocess; ORs over `imatrix_eager_load` / `ppl_eager_load`. Equivalent to passing `--no-mmap` on the CLI. |
 
-Keys `kl_validate`, `kl_priorities`, `kl_ppl_chunks`, `imatrix_eager_load`, and
-`ppl_eager_load` are **not written** by the first-run installer; add them
-manually when needed.
+Keys `kl_validate`, `kl_priorities`, `kl_ppl_chunks`, `imatrix_eager_load`,
+`ppl_eager_load`, and `no_mmap` are **not written** by the first-run installer;
+add them manually when needed.
 
 ### 8.2 `[precondition]` section
 
@@ -1244,13 +1247,15 @@ error, typically on models > ~15B at BF16.
 `--no-mmap`, forcing the entire model into RAM. As of 2026-05-22, `--no-mmap`
 is opt-in via `imatrix_eager_load` and `ppl_eager_load` (both default `false`).
 If you have either flag set to `true` in your config and the model does not fit
-in RAM, you will OOM.
+in RAM, you will OOM. The global `no_mmap = true` / `--no-mmap` flag has the
+same effect when set.
 
 **Fix:** Remove or set to `false` in your config:
 
 ```toml
 imatrix_eager_load = false
 ppl_eager_load = false
+no_mmap = false
 ```
 
 ### `llama-quantize` / `llama-quantize-cost` not found
