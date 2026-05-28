@@ -117,6 +117,13 @@ class Config:
     # functional. Set via --no-mmap CLI flag or no_mmap TOML key.
     no_mmap: bool = False
 
+    # Context size (-c) passed to llama-imatrix in Stage D. Each chunk fed to
+    # the tool is exactly imatrix_ctx tokens. Smaller ctx = more diverse
+    # short-window samples; larger ctx = fewer-but-longer-range samples.
+    # 512 is the llama-imatrix built-in default and community standard
+    # (ikawrakow's own recipe, ubergarm, mradermacher); 4096 sees rarer use.
+    imatrix_ctx: int = 512
+
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -197,10 +204,13 @@ def load_config(config_path: Optional[Path] = None,
 
     ppl_chunks = int(section.get("ppl_chunks", 50))
     imatrix_chunks = int(section.get("imatrix_chunks", 50))
+    imatrix_ctx = int(section.get("imatrix_ctx", 512))
     if ppl_chunks < 1:
         raise ValueError(f"config 'ppl_chunks' must be ≥ 1; got {ppl_chunks}")
     if imatrix_chunks < 1:
         raise ValueError(f"config 'imatrix_chunks' must be ≥ 1; got {imatrix_chunks}")
+    if imatrix_ctx < 1:
+        raise ValueError(f"config 'imatrix_ctx' must be ≥ 1; got {imatrix_ctx}")
 
     raw_convert = section.get("convert_script") or ""
     convert_script = _expand_path(raw_convert) if raw_convert else None
@@ -293,6 +303,7 @@ def load_config(config_path: Optional[Path] = None,
         imatrix_eager_load=imatrix_eager_load,
         ppl_eager_load=ppl_eager_load,
         no_mmap=no_mmap,
+        imatrix_ctx=imatrix_ctx,
         config_path=config_path,
     )
 

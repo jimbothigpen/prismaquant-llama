@@ -379,6 +379,8 @@ def add_explore_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--imatrix", default=None)
     p.add_argument("--ppl-chunks", type=int, default=None)
     p.add_argument("--imatrix-chunks", type=int, default=None)
+    p.add_argument("--imatrix-ctx", type=int, default=None,
+                   help="context size for llama-imatrix Stage D (default: from config)")
     p.add_argument("--convert-script", type=Path, default=None)
     p.add_argument("--output-csv", type=Path, default=None,
                    help="write the sweep matrix as CSV to this path")

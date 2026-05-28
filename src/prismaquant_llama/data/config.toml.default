@@ -281,6 +281,27 @@ imatrix_chunks = 50
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# imatrix_ctx — context window size (-c) passed to llama-imatrix in Stage D.
+# Each chunk fed to the tool spans exactly imatrix_ctx tokens. The key tradeoff:
+#
+#   Lower ctx (e.g. 512): each chunk is short, forcing sampling across many
+#   distinct text regions → finer-grained, more diverse activation statistics.
+#   This is the llama-imatrix built-in default and the de facto community
+#   standard (used by ikawrakow, ubergarm, mradermacher, and others).
+#
+#   Higher ctx (e.g. 4096): fewer chunks but longer context per chunk → captures
+#   longer-range attention dependencies at the cost of reduced sample diversity.
+#   Rarely recommended in practice; ikawrakow explicitly prefers 512.
+#
+# Note: with imatrix_chunks=50, imatrix_ctx=512 processes 25,600 tokens total.
+# For production-quality quants, consider raising imatrix_chunks to 200+.
+#
+# Override per-run with `--imatrix-ctx 512`.
+# ──────────────────────────────────────────────────────────────────────────────
+imatrix_ctx = 512
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # convert_script — path to llama.cpp's `convert_hf_to_gguf.py` (used by
 # Stage B to convert HuggingFace safetensors to BF16 GGUF).
 #

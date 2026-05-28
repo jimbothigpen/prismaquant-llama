@@ -336,11 +336,11 @@ def stage_c_probe(cfg: Config, layout: Layout, safetensors_dir: Path,
 
 
 def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
-                    imatrix_corpus: Path, ctx: int = 4096) -> Path:
+                    imatrix_corpus: Path) -> Path:
     """Stage D — generate (or download) imatrix file."""
     model_sha = _file_sha256(bf16_path)
     corpus_sha = _file_sha256(imatrix_corpus)
-    cache = layout.imatrix_cache_path(model_sha, corpus_sha, cfg.imatrix_chunks)
+    cache = layout.imatrix_cache_path(model_sha, corpus_sha, cfg.imatrix_chunks, cfg.imatrix_ctx)
     if cache.exists():
         _log(layout, "D", f"D. imatrix cached at {cache} (skip)")
         return cache
@@ -348,7 +348,7 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
     _log(layout, "D", f"D. generating imatrix → {cache}")
     imatrix_args = [str(imatrix_bin), "-m", str(bf16_path),
                     "-f", str(imatrix_corpus), "-o", str(cache),
-                    "-c", str(ctx), "-ngl", "99"]
+                    "-c", str(cfg.imatrix_ctx), "-ngl", "99"]
     if cfg.no_mmap or cfg.imatrix_eager_load:
         imatrix_args.extend(_no_mmap_args("llama-imatrix"))
     imatrix_args += ["--chunks", str(cfg.imatrix_chunks),
@@ -1820,6 +1820,8 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                    help="chunks for llama-perplexity (default: from config)")
     p.add_argument("--imatrix-chunks", type=int, default=None,
                    help="chunks for llama-imatrix (default: from config)")
+    p.add_argument("--imatrix-ctx", type=int, default=None,
+                   help="context size for llama-imatrix Stage D (default: from config)")
     p.add_argument("--convert-script", type=Path, default=None,
                    help="path to convert_hf_to_gguf.py (default: from config "
                         "or auto-discover from llama.cpp source tree)")
@@ -1890,6 +1892,8 @@ def cfg_from_args(args) -> Config:
         cfg.ppl_chunks = args.ppl_chunks
     if args.imatrix_chunks is not None:
         cfg.imatrix_chunks = args.imatrix_chunks
+    if getattr(args, "imatrix_ctx", None) is not None:
+        cfg.imatrix_ctx = args.imatrix_ctx
     if args.ppl_corpus is not None:
         cfg.ppl_corpus = args.ppl_corpus
     if args.imatrix_corpus is not None:

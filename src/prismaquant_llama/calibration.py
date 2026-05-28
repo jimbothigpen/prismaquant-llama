@@ -547,6 +547,8 @@ def add_calibrate_args(p: argparse.ArgumentParser) -> None:
                         "i-quants and IK-family quants are penalized.")
     p.add_argument("--imatrix-chunks", type=int, default=None,
                    help="chunks for llama-imatrix (default: from config)")
+    p.add_argument("--imatrix-ctx", type=int, default=None,
+                   help="context size for llama-imatrix Stage D (default: from config)")
     p.add_argument("--imatrix", default=None,
                    help="existing imatrix file path or URL (overrides "
                         "imatrix generation)")
