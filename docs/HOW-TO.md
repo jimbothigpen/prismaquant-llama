@@ -523,9 +523,9 @@ see `scale length X ≠ in_features Y ... likely a stale act-cache` errors.
 
 Generates the importance matrix using `llama-imatrix` on the BF16 GGUF.
 
-Cache key: `_shared/imatrix-cache/<model-sha>__<corpus-sha>__c<chunks>__x<ctx>.imatrix.gguf`.
-Different (`--imatrix-chunks`, `--imatrix-ctx`, corpus, or BF16 content) → different cache entry,
-so changing chunk count or context size invalidates cleanly without manual removal.
+Cache key: `_shared/imatrix-cache/<model-sha>__<corpus-sha>__c<chunks>__x<ctx>[__moe<N>].imatrix.gguf`.
+Different (`--imatrix-chunks`, `--imatrix-ctx`, corpus, BF16 content, or MoE override state) →
+different cache entry, so changing any of these invalidates cleanly without manual removal.
 
 **RAM behavior (since 2026-05-22).** `llama-imatrix` uses OS-level mmap by
 default (streaming; RAM bounded by VRAM + KV cache). Set `imatrix_eager_load =
@@ -534,6 +534,25 @@ loaded into RAM before computation). Use for small models that fit in RAM when
 predictable timing matters; OOMs on any model whose BF16 size exceeds available
 RAM. The global `no_mmap = true` / `--no-mmap` flag also covers this site (ORs
 over `imatrix_eager_load`).
+
+**MoE expert coverage (since 2026-05-28).** For Mixture-of-Experts models,
+sparse token routing means not all experts are activated by the calibration
+corpus — un-routed experts receive no imatrix gradient data and quantize to
+coarse default scales. `moe_all_experts_imatrix = true` (default) detects MoE
+models automatically by reading `<arch>.expert_count` and
+`<arch>.expert_used_count` from GGUF metadata, then passes
+`--override-kv <arch>.expert_used_count=int:<expert_count>` to force all routed
+experts active on every token during Stage D. Non-MoE models are unaffected.
+
+Wall-time cost: Stage D wall-time multiplies by `expert_count /
+expert_used_count` (e.g. ~4× for Mixtral-8x7B, ~16× for Qwen3-235B-A22B). If
+this is unacceptable on a GPU-poor host, pass `--no-moe-all-experts-imatrix`
+or set `moe_all_experts_imatrix = false` in config.
+
+Cache-key note: MoE+override runs get a `__moe{N}` suffix segment so they
+never collide with sparse-routing runs on the same model. Existing MoE imatrix
+files cached *without* the override (before 2026-05-28) will be regenerated on
+the next run.
 
 Override the generated imatrix with `--imatrix /path/or/url` to skip Stage D
 entirely and use an existing file.
@@ -879,6 +898,7 @@ The starter config auto-install triggers on any invocation not using `--config`.
 | `--ppl-chunks N` | from config | Chunks for `llama-perplexity` |
 | `--imatrix-chunks N` | from config | Chunks for `llama-imatrix` |
 | `--imatrix-ctx N` | from config | Context size for `llama-imatrix` Stage D (default: 512) |
+| `--moe-all-experts-imatrix` / `--no-moe-all-experts-imatrix` | from config (`true`) | Force all routed experts active during Stage D for MoE models via `--override-kv <arch>.expert_used_count=int:<expert_count>`. No-op on non-MoE models. |
 | `--convert-script PATH` | auto-discover | Path to `convert_hf_to_gguf.py` |
 | `--purge {yes,no}` | `yes` | Clean up artifacts after run |
 | `--yes` / `-y` | false | Skip pre-flight confirmation (required for scripts) |
@@ -917,6 +937,7 @@ prismaquant-llama calibrate {system|model} INPUT [flags]
 | `--imatrix-corpus PATH\|URL` | from config | imatrix corpus |
 | `--imatrix-chunks N` | from config | Chunks for `llama-imatrix` |
 | `--imatrix-ctx N` | from config | Context size for `llama-imatrix` Stage D (default: 512) |
+| `--moe-all-experts-imatrix` / `--no-moe-all-experts-imatrix` | from config (`true`) | Force all routed experts active during Stage D for MoE models. No-op on non-MoE models. |
 | `--imatrix PATH\|URL` | (generate) | Existing imatrix file |
 | `--convert-script PATH` | auto-discover | Path to `convert_hf_to_gguf.py` |
 | `--purge {yes,no}` | `yes` | Clean up after calibration |
@@ -945,6 +966,7 @@ prismaquant-llama explore INPUT [flags]
 | `--ppl-chunks N` | from config | Chunks (used by Stage C/D; not Stage I — explore skips I) |
 | `--imatrix-chunks N` | from config | Chunks for `llama-imatrix` |
 | `--imatrix-ctx N` | from config | Context size for `llama-imatrix` Stage D (default: 512) |
+| `--moe-all-experts-imatrix` / `--no-moe-all-experts-imatrix` | from config (`true`) | Force all routed experts active during Stage D for MoE models. No-op on non-MoE models. |
 | `--convert-script PATH` | auto-discover | Path to `convert_hf_to_gguf.py` |
 | `--output-csv PATH` | (none) | Also write sweep results as CSV |
 | `--output-md PATH` | (none) | Also write sweep results as Markdown |
@@ -1000,9 +1022,10 @@ All keys have CLI flag overrides; see §7 for flag names.
 | `imatrix_eager_load` | bool | `false` | Pass `--no-mmap` to `llama-imatrix` (Stage D); eager full-model RAM load |
 | `ppl_eager_load` | bool | `false` | Pass `--no-mmap` to `llama-perplexity` (Stages I, K-ref, K-cand, calibration) |
 | `no_mmap` | bool | `false` | Global override: force mmap-disable on every supporting llama-binary subprocess; ORs over `imatrix_eager_load` / `ppl_eager_load`. Equivalent to passing `--no-mmap` on the CLI. |
+| `moe_all_experts_imatrix` | bool | `true` | For MoE models, pass `--override-kv <arch>.expert_used_count=int:<expert_count>` to `llama-imatrix` (Stage D), forcing all routed experts active during calibration. Auto-detects MoE via GGUF metadata; no-op on dense models. Wall-time cost: multiplies Stage D by `expert_count / expert_used_count`. |
 
 Keys `kl_validate`, `kl_priorities`, `kl_ppl_chunks`, `imatrix_eager_load`,
-`ppl_eager_load`, and `no_mmap` are **not written** by the first-run installer;
+`ppl_eager_load`, `no_mmap`, and `moe_all_experts_imatrix` are **not written** by the first-run installer;
 add them manually when needed.
 
 ### 8.2 `[precondition]` section

@@ -9,6 +9,110 @@ This project has not cut a tagged release yet (`pyproject.toml` reports
 
 ## [Unreleased]
 
+### 2026-05-28 — MoE-aware Stage D: `--override-kv` expert coverage, `moe_all_experts_imatrix` knob
+
+Ensures every routed expert in a Mixture-of-Experts model receives imatrix
+calibration data during Stage D `llama-imatrix`.
+
+**Problem.** MoE models route each token to a sparse subset of experts (top-k).
+With typical calibration corpora and the default `expert_used_count`, many
+experts are never activated and therefore receive no imatrix gradient signal.
+Those experts quantize to coarse default scales, hurting quantization quality
+on any token that does route through them at inference time.
+
+**Fix.** Auto-detect MoE at Stage D entry by reading `general.architecture`,
+`<arch>.expert_count`, and `<arch>.expert_used_count` from the BF16 GGUF.
+If `expert_count > 1` and `expert_count != expert_used_count`, pass:
+
+```
+--override-kv <arch>.expert_used_count=int:<expert_count>
+```
+
+to `llama-imatrix`, forcing all routed experts active on every calibration
+token. The GGUF file on disk is **never modified** — the override is an
+in-memory metadata patch at model-load time via llama.cpp's `--override-kv`
+mechanism.
+
+**New `Config` field** `moe_all_experts_imatrix: bool = True`. Default ON so
+MoE models get full expert coverage without any user action.
+
+**New TOML key** `moe_all_experts_imatrix = true` in `[prismaquant-llama]`.
+Set to `false` to opt out globally (e.g. GPU-poor hosts where the Stage D
+wall-time multiplier is unacceptable).
+
+**New CLI flag** `--moe-all-experts-imatrix` / `--no-moe-all-experts-imatrix`
+(`argparse.BooleanOptionalAction`) on all three user-facing subcommands (`run`,
+`calibrate`, `explore`). Default `None` (uses config value); explicit flag
+overrides `cfg.moe_all_experts_imatrix` for that invocation. Wired through
+`cfg_from_args`.
+
+**Arch coverage** — detection is prefix-agnostic: `general.architecture` is
+read from GGUF metadata and used to construct the key names dynamically. Known
+MoE arch prefixes (verified against llama.cpp `src/llama-arch.cpp`):
+
+| Model family | GGUF `general.architecture` |
+|---|---|
+| Mixtral / LLaMA-MoE | `llama` |
+| LLaMA 4 | `llama4` |
+| Qwen2-MoE | `qwen2moe` |
+| Qwen3-MoE | `qwen3moe` |
+| Qwen3.5-MoE | `qwen35moe` |
+| Qwen3-VL-MoE | `qwen3vlmoe` |
+| Phi-MoE | `phimoe` |
+| DeepSeek-V1 | `deepseek` |
+| DeepSeek-V2 / V3 | `deepseek2` |
+| OLMoE | `olmoe` |
+| Granite-MoE | `granitemoe` |
+| Jamba | `jamba` |
+
+**DeepSeek shared-expert note.** DeepSeek-V2/V3 have a separate
+`expert_shared_count` (shared experts always active, not subject to top-k
+routing). The `--override-kv` on `expert_used_count` only affects the
+*routed* pool — it expands the routed top-k to cover all routed experts while
+leaving shared experts untouched (they were never sparse to begin with).
+
+**Wall-time impact.** Stage D wall-time multiplies by
+`expert_count / expert_used_count` — for example:
+
+- Mixtral-8x7B (8 experts, top-2): ~4×
+- Phi-3.5-MoE (16 experts, top-2): ~8×
+- Qwen3-30B-A3B (128 experts, top-8): ~16×
+- Qwen3-235B-A22B (128 experts, top-8): ~16×
+- DeepSeek-V3 (256 routed experts, top-8): ~32×
+
+Stage D is a single pass over the calibration corpus; absolute time is bounded
+by `imatrix_chunks × imatrix_ctx` token count regardless of the multiplier.
+
+**Cache-key extension** — `_shared/imatrix-cache/` filenames now include an
+optional `__moe{N}` segment when the MoE override is active:
+
+```
+# Non-MoE or opted-out (unchanged from prior key shape)
+<model-sha12>__<corpus-sha12>__c<chunks>__x<ctx>.imatrix.gguf
+
+# MoE with override active (new)
+<model-sha12>__<corpus-sha12>__c<chunks>__x<ctx>__moe<expert_count>.imatrix.gguf
+```
+
+Existing MoE imatrix files cached **without** the override (any prior
+prismaquant-llama version) will be regenerated on the next MoE run. Existing
+non-MoE / dense-model caches are **unaffected** (key shape unchanged). Disk
+cost per imatrix is small (~MB-scale). There is **no backwards-compat fallback**
+— clean break for MoE models.
+
+**Community-recipe confirmation.** The `expert_used_count = expert_count`
+override pattern is canonical in the llama.cpp quantization community:
+- mradermacher (Qwen3-MoE imatrix recipe, 2026-05):
+  `--override-kv qwen3moe.expert_used_count=int:24` (uses intermediate value
+  rather than full count; see note below)
+- Broader community consensus: override is required for MoE imatrix quality;
+  exact value is model-dependent.
+
+Note: some community recipes use fewer-than-max experts (e.g. 24/128 for
+Qwen3-235B). prismaquant-llama defaults to the full `expert_count` for
+maximum coverage; use `--no-moe-all-experts-imatrix` and a manual `--imatrix`
+file if you prefer a partial-expert calibration.
+
 ### 2026-05-28 — `--imatrix-ctx` CLI flag, `imatrix_ctx` TOML key, and cache-key extension
 
 Exposes the `llama-imatrix` context size (`-c` flag) as a first-class knob on
