@@ -302,6 +302,29 @@ imatrix_ctx = 512
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# moe_all_experts_imatrix — for MoE models, force every routed expert active
+# during Stage D llama-imatrix by passing:
+#   --override-kv <arch>.expert_used_count=int:<expert_count>
+#
+# Without this, token routing during calibration is sparse: experts that happen
+# not to be activated by the calibration corpus receive no imatrix gradient data
+# and quantize to coarse default scales, hurting MoE quantization quality.
+#
+# Cost: Stage D wall-time multiplies by expert_count / expert_used_count.
+# Examples: ~4× for Mixtral-8x7B (8/2), ~16× for Qwen3-235B-A22B (128/8),
+# ~18× for DeepSeek-V3 (256/8 routed experts; shared experts are unaffected).
+#
+# Default ON; set to false only if you are running Stage D on a GPU-poor host
+# where the wall-time cost of activating all experts is unacceptable, or if you
+# have community evidence that a specific model family benefits from fewer
+# calibration experts. Non-MoE models are completely unaffected (no-op).
+#
+# Override per-run with `--no-moe-all-experts-imatrix`.
+# ──────────────────────────────────────────────────────────────────────────────
+moe_all_experts_imatrix = true
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # convert_script — path to llama.cpp's `convert_hf_to_gguf.py` (used by
 # Stage B to convert HuggingFace safetensors to BF16 GGUF).
 #

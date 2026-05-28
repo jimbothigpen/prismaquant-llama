@@ -239,6 +239,37 @@ def _patch_no_mtp_metadata(bf16_path: Path) -> tuple[int, int] | None:
     return (old_bc, old_nextn)
 
 
+def _moe_override_kv_args(bf16_path: Path) -> tuple[list[str], int | None, str | None]:
+    """Inspect a BF16 GGUF for MoE metadata; if MoE, return the
+    --override-kv argv tail that forces every routed expert active during
+    llama-imatrix collection. Returns ([], None, None) for non-MoE.
+
+    MoE detection: presence of <arch>.expert_count > 1 in GGUF metadata,
+    where <arch> is the value of general.architecture. The override is
+    meaningful iff expert_count != expert_used_count (i.e. routing is
+    actually top-k sparse). Read-only GGUF open — no metadata mutation.
+    """
+    from gguf import GGUFReader
+    try:
+        r = GGUFReader(str(bf16_path))   # read-only mode
+    except (ValueError, Exception):
+        return [], None, None
+    arch_field = r.fields.get("general.architecture")
+    if arch_field is None:
+        return [], None, None
+    arch = bytes(arch_field.parts[arch_field.data[0]]).decode("utf-8")
+    ec_field = r.fields.get(f"{arch}.expert_count")
+    euc_field = r.fields.get(f"{arch}.expert_used_count")
+    if ec_field is None or euc_field is None:
+        return [], None, None
+    expert_count = int(ec_field.parts[ec_field.data[0]][0])
+    expert_used_count = int(euc_field.parts[euc_field.data[0]][0])
+    if expert_count <= 1 or expert_count == expert_used_count:
+        return [], None, None
+    override = f"{arch}.expert_used_count=int:{expert_count}"
+    return ["--override-kv", override], expert_count, arch
+
+
 def convert_to_bf16(cfg: Config, layout: Layout,
                     safetensors_dir: Path, model_name: str) -> Path:
     """Stage B. Convert safetensors → reference GGUF (BF16 or F16, per
@@ -340,7 +371,15 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
     """Stage D — generate (or download) imatrix file."""
     model_sha = _file_sha256(bf16_path)
     corpus_sha = _file_sha256(imatrix_corpus)
-    cache = layout.imatrix_cache_path(model_sha, corpus_sha, cfg.imatrix_chunks, cfg.imatrix_ctx)
+    # MoE detection must happen before cache-key construction so MoE+override
+    # runs get a distinct __moe{N} segment (the imatrix data is materially
+    # different from a sparse-routing run on the same model).
+    if cfg.moe_all_experts_imatrix:
+        moe_args, moe_ec, moe_arch = _moe_override_kv_args(bf16_path)
+    else:
+        moe_args, moe_ec, moe_arch = [], None, None
+    cache = layout.imatrix_cache_path(model_sha, corpus_sha, cfg.imatrix_chunks,
+                                      cfg.imatrix_ctx, moe_forced_used=moe_ec)
     if cache.exists():
         _log(layout, "D", f"D. imatrix cached at {cache} (skip)")
         return cache
@@ -353,6 +392,11 @@ def stage_d_imatrix(cfg: Config, layout: Layout, bf16_path: Path,
         imatrix_args.extend(_no_mmap_args("llama-imatrix"))
     imatrix_args += ["--chunks", str(cfg.imatrix_chunks),
                      "-ctk", "f16", "-ctv", "f16"]
+    if moe_args:
+        imatrix_args += moe_args
+        print(f"[Stage D] MoE detected ({moe_arch}, {moe_ec} experts) — "
+              f"appending --override-kv {moe_arch}.expert_used_count=int:{moe_ec}",
+              flush=True)
     rc = _run(imatrix_args,
               layout.logs_dir / "stage-D.log",
               env=subprocess_env(cfg))
@@ -1866,6 +1910,15 @@ def add_run_args(p: argparse.ArgumentParser) -> None:
                    help="force --no-mmap on every llama-binary subprocess that "
                         "supports it (overrides imatrix_eager_load / ppl_eager_load "
                         "TOML keys for this run; default off = streaming)")
+    p.add_argument("--moe-all-experts-imatrix",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   dest="moe_all_experts_imatrix",
+                   help="for MoE models, force all routed experts active during "
+                        "Stage D llama-imatrix via --override-kv "
+                        "<arch>.expert_used_count=int:<expert_count>. Default: "
+                        "on (auto-applies when MoE is detected). Pass "
+                        "--no-moe-all-experts-imatrix to opt out. No-op on "
+                        "non-MoE models.")
 
 
 def cfg_from_args(args) -> Config:
@@ -1906,6 +1959,8 @@ def cfg_from_args(args) -> Config:
         cfg.precondition_bpw_floor = args.precondition_bpw_floor
     if getattr(args, "no_mmap", False):
         cfg.no_mmap = True
+    if getattr(args, "moe_all_experts_imatrix", None) is not None:
+        cfg.moe_all_experts_imatrix = args.moe_all_experts_imatrix
     return cfg
 
 

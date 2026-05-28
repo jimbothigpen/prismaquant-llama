@@ -391,6 +391,15 @@ def add_explore_args(p: argparse.ArgumentParser) -> None:
                    help="force --no-mmap on every llama-binary subprocess that "
                         "supports it (overrides imatrix_eager_load / ppl_eager_load "
                         "TOML keys for this run; default off = streaming)")
+    p.add_argument("--moe-all-experts-imatrix",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   dest="moe_all_experts_imatrix",
+                   help="for MoE models, force all routed experts active during "
+                        "Stage D llama-imatrix via --override-kv "
+                        "<arch>.expert_used_count=int:<expert_count>. Default: "
+                        "on (auto-applies when MoE is detected). Pass "
+                        "--no-moe-all-experts-imatrix to opt out. No-op on "
+                        "non-MoE models.")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

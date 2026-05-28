@@ -95,8 +95,12 @@ class Layout:
                   self.recipes_dir, self.logs_dir):
             d.mkdir(parents=True, exist_ok=True)
 
-    def imatrix_cache_path(self, model_sha: str, corpus_sha: str, chunks: int, ctx: int) -> Path:
-        key = f"{model_sha[:12]}__{corpus_sha[:12]}__c{chunks}__x{ctx}.imatrix.gguf"
+    def imatrix_cache_path(self, model_sha: str, corpus_sha: str, chunks: int, ctx: int,
+                           moe_forced_used: int | None = None) -> Path:
+        key = f"{model_sha[:12]}__{corpus_sha[:12]}__c{chunks}__x{ctx}"
+        if moe_forced_used is not None:
+            key += f"__moe{moe_forced_used}"
+        key += ".imatrix.gguf"
         return self.imatrix_cache / key
 
     def costs_cache_path(self, bf16_sha: str, imatrix_sha: str,

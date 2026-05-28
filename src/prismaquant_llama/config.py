@@ -124,6 +124,15 @@ class Config:
     # (ikawrakow's own recipe, ubergarm, mradermacher); 4096 sees rarer use.
     imatrix_ctx: int = 512
 
+    # moe_all_experts_imatrix — for MoE models, force every routed expert active
+    # during Stage D llama-imatrix collection by passing
+    # --override-kv <arch>.expert_used_count=int:<expert_count>. Without this,
+    # un-routed experts get no imatrix data and quantize to default scales,
+    # hurting MoE quality. Default ON: auto-applies when the model is detected
+    # as MoE (expert_count > 1 in GGUF metadata). Cost: Stage D wall-time
+    # multiplies by (expert_count / expert_used_count). Non-MoE models: no-op.
+    moe_all_experts_imatrix: bool = True
+
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
 
@@ -205,6 +214,7 @@ def load_config(config_path: Optional[Path] = None,
     ppl_chunks = int(section.get("ppl_chunks", 50))
     imatrix_chunks = int(section.get("imatrix_chunks", 50))
     imatrix_ctx = int(section.get("imatrix_ctx", 512))
+    moe_all_experts_imatrix = bool(section.get("moe_all_experts_imatrix", True))
     if ppl_chunks < 1:
         raise ValueError(f"config 'ppl_chunks' must be ≥ 1; got {ppl_chunks}")
     if imatrix_chunks < 1:
@@ -304,6 +314,7 @@ def load_config(config_path: Optional[Path] = None,
         ppl_eager_load=ppl_eager_load,
         no_mmap=no_mmap,
         imatrix_ctx=imatrix_ctx,
+        moe_all_experts_imatrix=moe_all_experts_imatrix,
         config_path=config_path,
     )
 
