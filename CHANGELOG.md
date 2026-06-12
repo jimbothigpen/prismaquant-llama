@@ -210,7 +210,7 @@ in config.
 ### 2026-05-27 — Post-Stage-B GGUF metadata patch for `--no-mtp` models
 
 After Stage B completes for `--no-mtp` models (Qwen3.5/3.6), the BF16 GGUF
-is now patched in place to correct stale KV metadata left by yggdrasil's
+is now patched in place to correct stale KV metadata left by the upstream
 `convert_hf_to_gguf.py --no-mtp`: that flag strips the MTP-head tensors but
 does **not** update `<arch>.block_count` or zero `<arch>.nextn_predict_layers`,
 causing Stage D (`llama-imatrix`) to fail with
@@ -218,7 +218,7 @@ causing Stage D (`llama-imatrix`) to fail with
 
 The patch decrements `block_count` by `nextn_predict_layers` and zeros
 `nextn_predict_layers` via an in-place mmap write (fixed-size uint32 — no byte
-offset shifts). It is defensive: becomes a no-op once yggdrasil ships its own
+offset shifts). It is defensive: becomes a no-op once upstream ships its own
 fix (field will already be 0), and is skipped entirely for any GGUF that lacks
 the `nextn_predict_layers` field.
 

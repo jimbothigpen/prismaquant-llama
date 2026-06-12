@@ -209,13 +209,13 @@ def _stage_b_extra_args(safetensors_dir: Path) -> list[str]:
 
 
 def _patch_no_mtp_metadata(bf16_path: Path) -> tuple[int, int] | None:
-    """Fix GGUF KV metadata left stale by yggdrasil's --no-mtp convert path.
+    """Fix GGUF KV metadata left stale by the upstream --no-mtp convert path.
 
-    yggdrasil's convert_hf_to_gguf.py --no-mtp strips the MTP-head tensors
+    The upstream convert_hf_to_gguf.py --no-mtp strips the MTP-head tensors
     but does NOT update <arch>.block_count or zero <arch>.nextn_predict_layers.
     llama.cpp trusts block_count, walks to the (absent) MTP block, and fails
     with "missing tensor 'blk.<N>.attn_norm.weight'". Patch in place; becomes
-    a no-op once yggdrasil ships its own fix (nextn_predict_layers will be 0).
+    a no-op once upstream ships its own fix (nextn_predict_layers will be 0).
     """
     from gguf import GGUFReader
     r = GGUFReader(str(bf16_path), mode="r+")

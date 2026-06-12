@@ -187,8 +187,8 @@ def _actcache_file(act_cache_dir: Path, hf_base_name: str) -> Path:
 def _resolve_act_cache_dir(layout: Layout, model_name: str) -> Path:
     """Read the canonical activation_cache_dir from the probe.pkl meta.
 
-    Stage C's probe.pkl is often symlinked across hosts (ai01's Vulkan base
-    points to the canonical ai00 rocm-base probe). Its `meta.activation_cache_dir`
+    Stage C's probe.pkl is often symlinked across hosts (the secondary host's Vulkan base
+    points to the canonical ROCm-base probe). Its `meta.activation_cache_dir`
     records the absolute cephfs path where activations were saved — that's
     the right source even when this host has a stale local `probe/act-cache/`
     directory from an unrelated probe run.
@@ -263,7 +263,7 @@ def _copy_for_inplace_mutation(src: Path, dst: Path,
     t0 = time.time()
     try:
         # cephfs supports reflinks via FICLONE; very fast COW copy. Use
-        # absolute path to dodge non-interactive ssh PATH gaps on ai01.
+        # absolute path to dodge non-interactive ssh PATH gaps on the secondary host.
         import subprocess
         rc = subprocess.run(["/usr/bin/cp", "--reflink=auto",
                              str(src), str(dst)], check=False).returncode

@@ -1,5 +1,5 @@
 {
-  "_comment": "Hardware-agnostic per-format perf defaults. Calibrated at chunks=200 on Qwen/Qwen3-8B (AMD gfx1150 GPU). Absolute pp/tg are nulled; only ratios ship. Overwritten when the user runs `prismaquant-llama calibrate system <input>`.",
+  "_comment": "Hardware-agnostic per-format perf defaults. Calibrated at chunks=200 on Qwen/Qwen3-8B (AMD RDNA3.5 GPU). Absolute pp/tg are nulled; only ratios ship. Overwritten when the user runs `prismaquant-llama calibrate system <input>`.",
   "_reference_model": "Qwen/Qwen3-8B",
   "_calibration_chunks": 200,
   "_schema_version": 4,

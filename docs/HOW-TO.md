@@ -42,12 +42,12 @@ specifics.
 
 ### 1.2 The prismaquant-llama package
 
-**Development (editable) install — builduser pattern:**
+**Development (editable) install — dev user pattern:**
 
 ```bash
-# From the repo root (cephfs canonical path):
+# From the repo root:
 pip install --break-system-packages -e \
-    /mnt/cephfs/0/Container/systems/ai00/users/builduser/projects/prismaquant-llama/src/jimbothigpen/prismaquant-llama
+    <your-checkout-root>/prismaquant-llama
 
 # Or from a local clone:
 git clone https://github.com/jimbothigpen/prismaquant-llama
@@ -65,22 +65,21 @@ Re-run `pip install -e .` only when `pyproject.toml` deps change or when the
 pip install -e ".[dev]"
 ```
 
-**Wheel install — llamauser / production pattern:**
+**Wheel install — production user pattern:**
 
-The llamauser venv on ai00 and ai01 lives at
-`/home/llamauser/.venvs/prismaquant` (plural `.venvs`, no hyphen). Build the
-wheel as builduser, then install it for llamauser:
+The production user's venv lives at `/path/to/production-venv`. Build the
+wheel as the dev user, then install it for the production user:
 
 ```bash
-# Build a pure-Python wheel (stage to cephfs, not /tmp):
+# Build a pure-Python wheel (stage to a persistent path, not /tmp):
 pip wheel --no-deps -w /path/to/stage/ \
-    /mnt/cephfs/0/Container/systems/ai00/users/builduser/projects/prismaquant-llama/src/jimbothigpen/prismaquant-llama
+    <your-checkout-root>/prismaquant-llama
 
-# Install into llamauser's venv on ai00:
-sudo -u llamauser /home/llamauser/.venvs/prismaquant/bin/pip install \
+# Install into the production user's venv:
+sudo -u <prod-user> /path/to/production-venv/bin/pip install \
     --force-reinstall --no-deps /path/to/stage/prismaquant_llama-*-py3-none-any.whl
 
-# Repeat on ai01 (SSH on port 2229).
+# Repeat on the secondary host.
 ```
 
 **Cross-user egg-info pitfall.** `pip install -e <shared-path>` as user A
@@ -144,10 +143,10 @@ directory. It works against mainline, ik_llama, and any fork
 without modification. See the tool's README for a verify workflow.
 
 **Symlink note.** Older setups may have a `tools/quantize-cost` symlink that
-pointed at a local path. The canonical location on this ecosystem is:
+pointed at a local path. The canonical location is:
 
 ```
-/mnt/cephfs/0/Container/systems/ai00/users/builduser/projects/llama-quantize-cost/
+<your-checkout-root>/llama-quantize-cost/
 ```
 
 If the symlink is broken, re-create it or build from the repository directly.
