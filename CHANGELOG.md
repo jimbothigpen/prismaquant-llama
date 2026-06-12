@@ -507,6 +507,8 @@ value through `parse_budget()` to derive the glob pattern for summary files.
 
 ## Notes
 
+- Upstream `prismaquant` synced to `73fff34` on 2026-06-12 (45-commit RobTand catch-up from
+  `6261632`). All probe CLI contracts verified; Fisher sidecar byte-identical; zero P0 impact.
 - Upstream `prismaquant` synced to `6261632` on 2026-05-22 (prior sync
   stopped at `f49d5af`). The 2026-05-22 MTP budget-exclusion entry above
   ports the `6261632` behavior to the GGUF-native allocator path.
